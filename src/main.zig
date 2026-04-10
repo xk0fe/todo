@@ -11,6 +11,17 @@ comptime {
     _ = @import("storage/space_store.zig");
     _ = @import("storage/project_store.zig");
     _ = @import("storage/task_store.zig");
+    _ = @import("storage/config_store.zig");
+    _ = @import("storage/push_queue.zig");
+    _ = @import("integrations/types.zig");
+    _ = @import("integrations/json_util.zig");
+    _ = @import("integrations/http.zig");
+    _ = @import("integrations/github_oauth.zig");
+    _ = @import("integrations/linear.zig");
+    _ = @import("integrations/github.zig");
+    _ = @import("integrations/trello.zig");
+    _ = @import("integrations/sync.zig");
+    _ = @import("commands/sync.zig");
 }
 
 pub fn main() void {

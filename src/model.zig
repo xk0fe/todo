@@ -139,6 +139,29 @@ pub const ItemColor = enum {
     }
 };
 
+pub const IntegrationSource = enum {
+    none,
+    linear,
+    github,
+    trello,
+
+    pub fn fromString(s: []const u8) IntegrationSource {
+        if (std.mem.eql(u8, s, "linear")) return .linear;
+        if (std.mem.eql(u8, s, "github")) return .github;
+        if (std.mem.eql(u8, s, "trello")) return .trello;
+        return .none;
+    }
+
+    pub fn toString(self: IntegrationSource) []const u8 {
+        return switch (self) {
+            .none   => "",
+            .linear => "linear",
+            .github => "github",
+            .trello => "trello",
+        };
+    }
+};
+
 pub const SubTask = struct {
     title: []const u8,
     done:  bool,
@@ -149,14 +172,18 @@ pub const SubTask = struct {
 };
 
 pub const Task = struct {
-    id:          u32,
-    title:       []const u8,
-    status:      Status,
-    priority:    Priority,
-    description: []const u8,
-    created:     []const u8,
-    due:         []const u8,
-    subtasks:    []SubTask,
+    id:                 u32,
+    title:              []const u8,
+    status:             Status,
+    priority:           Priority,
+    description:        []const u8,
+    created:            []const u8,
+    due:                []const u8,
+    subtasks:           []SubTask,
+    // Integration fields — empty string / .none means not linked
+    external_id:        []const u8,
+    integration_source: IntegrationSource,
+    synced_at:          []const u8,
 
     pub fn deinit(self: Task, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
@@ -165,6 +192,8 @@ pub const Task = struct {
         allocator.free(self.due);
         for (self.subtasks) |st| st.deinit(allocator);
         allocator.free(self.subtasks);
+        allocator.free(self.external_id);
+        allocator.free(self.synced_at);
     }
 };
 

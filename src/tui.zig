@@ -1,10 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const vaxis = @import("vaxis");
 const model = @import("model.zig");
 const paths = @import("storage/paths.zig");
 const space_store = @import("storage/space_store.zig");
 const project_store = @import("storage/project_store.zig");
 const task_store = @import("storage/task_store.zig");
+const config_store = @import("storage/config_store.zig");
+const push_queue = @import("storage/push_queue.zig");
+const sync_engine = @import("integrations/sync.zig");
+const github_oauth = @import("integrations/github_oauth.zig");
 
 // ── Comptime percentage strings (0–100) ──────────────────────────────────────
 // Vaxis stores char.grapheme as a raw pointer; bufPrint'd stack buffers become
@@ -56,11 +61,81 @@ fn itemColorToVaxis(c: model.ItemColor) vaxis.Color {
     };
 }
 
+// ── OAuth ─────────────────────────────────────────────────────────────────────
+
+/// Posted by the background OAuth poll thread when it finishes.
+const OAuthEvent = struct {
+    token:   ?[]const u8 = null, // heap-owned by this event; save or free
+    err_msg: ?[]const u8 = null, // heap-owned; mutually exclusive with token
+};
+
+/// Context passed to the background OAuth polling thread.
+const OAuthPollCtx = struct {
+    allocator:     std.mem.Allocator,
+    client_id:     [128]u8,
+    client_id_len: usize,
+    device_code:   [512]u8,
+    device_code_len: usize,
+    interval:      i64,
+    cancel:        std.atomic.Value(bool),
+    loop:          *vaxis.Loop(Event),
+};
+
+fn oauthPollThread(ctx: *OAuthPollCtx) void {
+    const client_id   = ctx.client_id[0..ctx.client_id_len];
+    const device_code = ctx.device_code[0..ctx.device_code_len];
+    var   interval_ns: u64 = @intCast(@max(5, ctx.interval) * std.time.ns_per_s);
+
+    while (!ctx.cancel.load(.acquire)) {
+        std.Thread.sleep(interval_ns);
+        if (ctx.cancel.load(.acquire)) return;
+
+        const poll = github_oauth.pollToken(ctx.allocator, client_id, device_code) catch continue;
+        switch (poll) {
+            .token     => |t| {
+                ctx.loop.postEvent(.{ .oauth_result = .{ .token = t } });
+                return;
+            },
+            .slow_down => interval_ns += 5 * std.time.ns_per_s,
+            .expired   => {
+                const msg = ctx.allocator.dupe(u8, "Device code expired. Try again.") catch &[_]u8{};
+                ctx.loop.postEvent(.{ .oauth_result = .{ .err_msg = msg } });
+                return;
+            },
+            .denied    => {
+                const msg = ctx.allocator.dupe(u8, "Access denied.") catch &[_]u8{};
+                ctx.loop.postEvent(.{ .oauth_result = .{ .err_msg = msg } });
+                return;
+            },
+            .err       => |msg| {
+                ctx.loop.postEvent(.{ .oauth_result = .{ .err_msg = msg } });
+                return;
+            },
+            .pending   => {},
+        }
+    }
+}
+
+fn openBrowser(allocator: std.mem.Allocator, url: []const u8) void {
+    const argv: []const []const u8 = switch (builtin.os.tag) {
+        .macos              => &.{ "open", url },
+        .linux, .freebsd    => &.{ "xdg-open", url },
+        .windows            => &.{ "cmd.exe", "/c", "start", url },
+        else                => return,
+    };
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior  = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawnAndWait() catch {};
+}
+
 // ── Event ─────────────────────────────────────────────────────────────────────
 
 const Event = union(enum) {
-    key_press: vaxis.Key,
-    winsize: vaxis.Winsize,
+    key_press:    vaxis.Key,
+    winsize:      vaxis.Winsize,
+    oauth_result: OAuthEvent,
 };
 
 // ── App modes ─────────────────────────────────────────────────────────────────
@@ -70,6 +145,7 @@ const Mode = enum {
     input,                // adding a space / project / task (or subtask/description)
     settings,             // settings overlay open
     settings_confirm,     // hard-reset confirmation dialog
+    auth_overlay,         // service authentication input overlay
     onboarding,           // first-launch wizard
     task_detail,          // task detail overlay
     task_confirm_delete,  // confirm before deleting a space/project/task
@@ -78,6 +154,7 @@ const Mode = enum {
 
 const Panel = enum { spaces, projects, tasks };
 const InputTarget = enum { space, project, task, subtask, description, task_title };
+const AuthMode = enum { choose, device_waiting, token_input };
 
 // ── Settings entries ──────────────────────────────────────────────────────────
 
@@ -88,7 +165,7 @@ const EntryKind = enum {
     todo,    // placeholder — not yet implemented
 };
 
-const SettingsId = enum { hard_reset, show_progress, alt_priority, task_color_grading, task_sort, linear };
+const SettingsId = enum { hard_reset, show_progress, alt_priority, task_color_grading, task_sort, linear, github, trello };
 
 const SettingsEntry = struct {
     kind:  EntryKind,
@@ -112,8 +189,12 @@ const settings_entries = [_]SettingsEntry{
     .{ .kind = .action,  .id = .task_sort,        .label = "Sort order",
        .sub  = "cycle: Default / Priority / Status" },
     .{ .kind = .section, .label = "Integrations" },
-    .{ .kind = .todo,    .id = .linear,           .label = "Linear",
-       .sub  = "sync tasks with Linear issues" },
+    .{ .kind = .todo,    .id = .linear,            .label = "Linear",
+       .sub  = "sync with Linear — run: todo sync linear <space> <project>" },
+    .{ .kind = .todo,    .id = .github,            .label = "GitHub Issues",
+       .sub  = "sync with GitHub — run: todo sync github <space> <project>" },
+    .{ .kind = .todo,    .id = .trello,            .label = "Trello",
+       .sub  = "sync with Trello — run: todo sync trello <space> <project>" },
 };
 
 // First selectable index (skips section headers)
@@ -213,6 +294,26 @@ const App = struct {
     ob_proj_buf:  [64]u8 = undefined,
     ob_proj_len:  usize = 0,
 
+    // auth overlay
+    auth_service:  SettingsId = .linear,
+    auth_mode:     AuthMode = .choose,
+    auth_choose_idx: u1 = 0, // 0 = browser/device, 1 = paste token
+    // token input
+    auth_buf:      [512]u8 = undefined,
+    auth_len:      usize = 0,
+    // OAuth device flow display
+    oauth_user_code_buf: [16]u8 = undefined,
+    oauth_user_code_len: usize = 0,
+    oauth_uri_buf:       [128]u8 = undefined,
+    oauth_uri_len:       usize = 0,
+    // background polling thread
+    oauth_poll_ctx:    ?*OAuthPollCtx = null,
+    oauth_poll_thread: ?std.Thread = null,
+
+    // sync notification bar (shown at bottom until next keypress)
+    notify_buf: [128]u8 = undefined,
+    notify_len: usize = 0,
+
     // ── lifecycle ─────────────────────────────────────────────────────────────
 
     fn init(allocator: std.mem.Allocator) !App {
@@ -229,12 +330,87 @@ const App = struct {
     }
 
     fn deinit(self: *App) void {
+        self.stopOAuthPoll();
         self.freeSpaces();
         self.freeProjects();
         self.freeTasks();
         self.freeSpaceColors();
         self.freeProjectColors();
         self.root_dir.close();
+    }
+
+    fn stopOAuthPoll(self: *App) void {
+        if (self.oauth_poll_ctx) |ctx| {
+            ctx.cancel.store(true, .release);
+        }
+        if (self.oauth_poll_thread) |t| {
+            t.detach();
+            self.oauth_poll_thread = null;
+        }
+        // ctx leaks intentionally — safe for a CLI tool (single instance, small)
+        self.oauth_poll_ctx = null;
+    }
+
+    fn startDeviceFlow(self: *App, loop: *vaxis.Loop(Event)) void {
+        var cfg = config_store.loadGlobalConfig(self.allocator, self.root_dir) catch return;
+        defer cfg.deinit(self.allocator);
+
+        const client_id = cfg.github_oauth_client_id;
+        if (client_id.len == 0) {
+            self.setNotify("Set github_oauth_client_id in config first (todo sync config --github-client-id ID)", .{});
+            self.auth_mode = .choose;
+            self.requestRefresh();
+            return;
+        }
+
+        const dc = github_oauth.requestDeviceCode(self.allocator, client_id) catch |err| {
+            self.setNotify("Failed to start device flow: {s}", .{@errorName(err)});
+            self.auth_mode = .choose;
+            self.requestRefresh();
+            return;
+        };
+        defer dc.deinit(self.allocator);
+
+        // Copy display values
+        const uc_len = @min(dc.user_code.len, self.oauth_user_code_buf.len);
+        @memcpy(self.oauth_user_code_buf[0..uc_len], dc.user_code[0..uc_len]);
+        self.oauth_user_code_len = uc_len;
+
+        const uri_len = @min(dc.verification_uri.len, self.oauth_uri_buf.len);
+        @memcpy(self.oauth_uri_buf[0..uri_len], dc.verification_uri[0..uri_len]);
+        self.oauth_uri_len = uri_len;
+
+        // Open the browser
+        openBrowser(self.allocator, dc.verification_uri);
+
+        // Start background poll
+        const ctx = self.allocator.create(OAuthPollCtx) catch return;
+        ctx.cancel = std.atomic.Value(bool).init(false);
+        ctx.allocator = self.allocator;
+        ctx.interval = dc.interval;
+        ctx.loop = loop;
+
+        const cid_len = @min(client_id.len, ctx.client_id.len);
+        @memcpy(ctx.client_id[0..cid_len], client_id[0..cid_len]);
+        ctx.client_id_len = cid_len;
+
+        const dc_len = @min(dc.device_code.len, ctx.device_code.len);
+        @memcpy(ctx.device_code[0..dc_len], dc.device_code[0..dc_len]);
+        ctx.device_code_len = dc_len;
+
+        self.stopOAuthPoll();
+        self.oauth_poll_ctx = ctx;
+        self.oauth_poll_thread = std.Thread.spawn(.{}, oauthPollThread, .{ctx}) catch {
+            self.allocator.destroy(ctx);
+            self.oauth_poll_ctx = null;
+            self.setNotify("Failed to start poll thread", .{});
+            self.auth_mode = .choose;
+            self.requestRefresh();
+            return;
+        };
+
+        self.auth_mode = .device_waiting;
+        self.requestRefresh();
     }
 
     fn freeSpaceColors(self: *App) void {
@@ -424,17 +600,126 @@ const App = struct {
             },
             .task_title => if (self.currentTask()) |task| {
                 if (self.currentSpace() != null and self.currentProject() != null) {
+                    const sp = self.currentSpace().?;
+                    const pj = self.currentProject().?;
                     task_store.update(
-                        self.allocator, self.root_dir,
-                        self.currentSpace().?, self.currentProject().?,
+                        self.allocator, self.root_dir, sp, pj,
                         task.id, .{ .title = text },
                     ) catch {};
+                    self.enqueuePush(sp, pj, task, null, text);
                     self.reloadTasks();
                 }
             },
         }
         self.mode = return_mode;
         self.input_len = 0;
+        self.requestRefresh();
+    }
+
+    fn setNotify(self: *App, comptime fmt: []const u8, args: anytype) void {
+        const s = std.fmt.bufPrint(&self.notify_buf, fmt, args) catch {
+            self.notify_len = 0; return;
+        };
+        self.notify_len = s.len;
+    }
+
+    /// Queue a push for a synced task then flush on next sync.
+    fn enqueuePush(
+        self: *App,
+        space: []const u8,
+        project: []const u8,
+        task: *const model.Task,
+        new_status: ?model.Status,
+        new_title: []const u8,
+    ) void {
+        if (task.external_id.len == 0) return;
+        const src: []const u8 = switch (task.integration_source) {
+            .github => "github",
+            .linear => "linear",
+            .trello => "trello",
+            .none   => return,
+        };
+        // Derive owner/repo from the project name (format: "owner - repo")
+        var owner: []const u8 = "";
+        var repo:  []const u8 = "";
+        if (task.integration_source == .github) {
+            if (std.mem.indexOf(u8, project, " - ")) |idx| {
+                owner = project[0..idx];
+                repo  = project[idx + 3 ..];
+            }
+        }
+        const status_str: []const u8 = if (new_status) |s| s.toString() else "";
+        const entry = push_queue.PushEntry{
+            .space       = space,
+            .project     = project,
+            .external_id = task.external_id,
+            .source      = src,
+            .owner       = owner,
+            .repo        = repo,
+            .new_status  = status_str,
+            .new_title   = new_title,
+        };
+        push_queue.append(self.root_dir, self.allocator, entry) catch {};
+    }
+
+    /// Save the API token from auth_buf, run the full auto-sync, reload data.
+    fn submitAuth(self: *App) void {
+        const token = self.auth_buf[0..self.auth_len];
+        if (token.len == 0) {
+            self.mode = .settings;
+            self.requestRefresh();
+            return;
+        }
+
+        var cfg = config_store.loadGlobalConfig(self.allocator, self.root_dir) catch {
+            self.setNotify("Error: could not load config", .{});
+            self.mode = .settings;
+            self.requestRefresh();
+            return;
+        };
+        defer cfg.deinit(self.allocator);
+
+        switch (self.auth_service) {
+            .linear => {
+                self.allocator.free(cfg.linear_api_key);
+                cfg.linear_api_key = self.allocator.dupe(u8, token) catch return;
+                cfg.linear_enabled = true;
+            },
+            .github => {
+                self.allocator.free(cfg.github_token);
+                cfg.github_token = self.allocator.dupe(u8, token) catch return;
+                cfg.github_enabled = true;
+            },
+            else => { self.mode = .settings; self.requestRefresh(); return; },
+        }
+
+        config_store.saveGlobalConfig(self.allocator, self.root_dir, cfg) catch {
+            self.setNotify("Error: could not save config", .{});
+            self.mode = .settings;
+            self.requestRefresh();
+            return;
+        };
+
+        // Flush any queued local changes before pulling remote
+        sync_engine.flushPushQueue(self.allocator, self.root_dir, cfg);
+
+        const result: sync_engine.SyncResult = switch (self.auth_service) {
+            .linear => sync_engine.autoSyncLinear(self.allocator, self.root_dir, cfg),
+            .github => sync_engine.autoSyncGitHub(self.allocator, self.root_dir, cfg),
+            else    => unreachable,
+        } catch |err| {
+            self.setNotify("Sync failed: {s}", .{@errorName(err)});
+            self.reloadSpaces();
+            self.mode = .settings;
+            self.requestRefresh();
+            return;
+        };
+
+        self.setNotify("Sync complete: {d} created, {d} updated, {d} errors",
+            .{ result.created, result.updated, result.errors });
+        self.reloadSpaces();
+        self.mode = .settings;
+        self.auth_len = 0;
         self.requestRefresh();
     }
 
@@ -487,10 +772,14 @@ fn deleteCurrentItem(app: *App) void {
 }
 
 fn handleKey(app: *App, key: vaxis.Key) bool {
+    // Any keypress clears the notify bar
+    app.notify_len = 0;
+
     switch (app.mode) {
         .input                => return handleInputKey(app, key),
         .settings             => return handleSettingsKey(app, key),
         .settings_confirm     => return handleSettingsConfirmKey(app, key),
+        .auth_overlay         => return handleAuthOverlayKey(app, key),
         .onboarding           => return handleOnboardingKey(app, key),
         .task_detail          => return handleTaskDetailKey(app, key),
         .task_confirm_delete  => return handleConfirmDeleteKey(app, key),
@@ -669,11 +958,148 @@ fn handleSettingsKey(app: *App, key: vaxis.Key) bool {
                 },
                 else => {},
             },
-            .todo, .section => {},
+            .todo => switch (entry.id) {
+                .linear, .github => {
+                    app.auth_service = entry.id;
+                    app.auth_mode = .choose;
+                    app.auth_choose_idx = 0;
+                    app.auth_len = 0;
+                    // Pre-fill with existing token so user can see it's set
+                    const cfg = config_store.loadGlobalConfig(app.allocator, app.root_dir) catch {
+                        app.mode = .auth_overlay;
+                        app.requestRefresh();
+                        return false;
+                    };
+                    defer cfg.deinit(app.allocator);
+                    const existing: []const u8 = switch (entry.id) {
+                        .linear => cfg.linear_api_key,
+                        .github => cfg.github_token,
+                        else    => "",
+                    };
+                    const copy_len = @min(existing.len, app.auth_buf.len);
+                    @memcpy(app.auth_buf[0..copy_len], existing[0..copy_len]);
+                    app.auth_len = copy_len;
+                    app.mode = .auth_overlay;
+                    app.requestRefresh();
+                },
+                else => {},
+            },
+            .section => {},
         }
         return false;
     }
     return false;
+}
+
+fn handleAuthOverlayKey(app: *App, key: vaxis.Key) bool {
+    if (key.matches(vaxis.Key.escape, .{})) {
+        switch (app.auth_mode) {
+            .choose => { app.mode = .settings; },
+            .device_waiting => {
+                app.stopOAuthPoll();
+                app.auth_mode = .choose;
+            },
+            .token_input => { app.auth_mode = .choose; },
+        }
+        app.requestRefresh();
+        return false;
+    }
+
+    switch (app.auth_mode) {
+        .choose => {
+            if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+                app.auth_choose_idx = 0;
+                app.requestRefresh();
+            } else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+                app.auth_choose_idx = 1;
+                app.requestRefresh();
+            } else if (key.matches(vaxis.Key.enter, .{})) {
+                const want_device_flow = app.auth_service == .github and app.auth_choose_idx == 0;
+                if (want_device_flow) {
+                    // Signals run() to call startDeviceFlow on the next iteration
+                    app.auth_mode = .device_waiting;
+                } else {
+                    // Token paste path
+                    if (app.auth_service == .linear and app.auth_choose_idx == 0) {
+                        openBrowser(app.allocator, "https://linear.app/settings/api");
+                    }
+                    app.auth_mode = .token_input;
+                }
+                app.requestRefresh();
+            }
+        },
+        .device_waiting => {
+            // No keys do anything while polling except Esc (handled above)
+        },
+        .token_input => {
+            if (key.matches(vaxis.Key.enter, .{})) {
+                app.submitAuth();
+            } else if (key.matches(vaxis.Key.backspace, .{})) {
+                if (app.auth_len > 0) app.auth_len -= 1;
+                app.requestRefresh();
+            } else if (key.text) |t| {
+                for (t) |ch| {
+                    if (app.auth_len < app.auth_buf.len) {
+                        app.auth_buf[app.auth_len] = ch;
+                        app.auth_len += 1;
+                    }
+                }
+                app.requestRefresh();
+            }
+        },
+    }
+    return false;
+}
+
+fn handleOAuthResult(app: *App, ev: OAuthEvent) void {
+    app.stopOAuthPoll();
+
+    if (ev.token) |token| {
+        defer app.allocator.free(token);
+        // Save the token the same way submitAuth does
+        var cfg = config_store.loadGlobalConfig(app.allocator, app.root_dir) catch {
+            app.setNotify("Error: could not load config", .{});
+            app.auth_mode = .choose;
+            app.mode = .settings;
+            app.requestRefresh();
+            return;
+        };
+        defer cfg.deinit(app.allocator);
+
+        app.allocator.free(cfg.github_token);
+        cfg.github_token = app.allocator.dupe(u8, token) catch return;
+        cfg.github_enabled = true;
+
+        config_store.saveGlobalConfig(app.allocator, app.root_dir, cfg) catch {
+            app.setNotify("Error: could not save config", .{});
+            app.auth_mode = .choose;
+            app.mode = .settings;
+            app.requestRefresh();
+            return;
+        };
+
+        sync_engine.flushPushQueue(app.allocator, app.root_dir, cfg);
+
+        const result = sync_engine.autoSyncGitHub(app.allocator, app.root_dir, cfg) catch |err| {
+            app.setNotify("Sync failed: {s}", .{@errorName(err)});
+            app.reloadSpaces();
+            app.auth_mode = .choose;
+            app.mode = .settings;
+            app.requestRefresh();
+            return;
+        };
+        app.setNotify("GitHub connected! Sync: {d} created, {d} updated", .{ result.created, result.updated });
+        app.reloadSpaces();
+    } else if (ev.err_msg) |msg| {
+        defer app.allocator.free(msg);
+        app.setNotify("OAuth failed: {s}", .{msg});
+    } else {
+        app.setNotify("OAuth cancelled.", .{});
+    }
+
+    app.auth_mode = .choose;
+    app.mode = .settings;
+    app.requestRefresh();
 }
 
 fn handleSettingsConfirmKey(app: *App, key: vaxis.Key) bool {
@@ -729,6 +1155,7 @@ fn handleColorPickerKey(app: *App, key: vaxis.Key) bool {
 fn applyStatusChange(app: *App, sp: []const u8, pj: []const u8, task: *const model.Task, new_status: ?model.Status) void {
     if (new_status) |s| {
         task_store.update(app.allocator, app.root_dir, sp, pj, task.id, .{ .status = s }) catch {};
+        app.enqueuePush(sp, pj, task, s, "");
         app.reloadTasks();
         app.recalcProgress();
         app.requestRefresh();
@@ -939,6 +1366,7 @@ pub fn render(app: *const App, win: vaxis.Window) void {
     // overlays — drawn last so they sit on top
     switch (app.mode) {
         .settings, .settings_confirm => renderSettingsOverlay(win, app),
+        .auth_overlay                => renderAuthOverlay(win, app),
         .onboarding                  => renderOnboardingOverlay(win, app),
         .task_detail                 => renderTaskDetailOverlay(win, app),
         .task_confirm_delete         => renderConfirmDeleteDialog(win, app),
@@ -948,6 +1376,23 @@ pub fn render(app: *const App, win: vaxis.Window) void {
             else => {},
         },
         else => {},
+    }
+
+    // Notification bar (shown over everything when notify_len > 0)
+    if (app.notify_len > 0) {
+        const msg = app.notify_buf[0..app.notify_len];
+        const ny = win.height -| 1;
+        var col: u16 = 0;
+        while (col < win.width) : (col += 1) {
+            win.writeCell(col, ny, .{
+                .char  = .{ .grapheme = " ", .width = 1 },
+                .style = .{ .fg = col_selected_fg, .bg = vaxis.Color{ .rgb = [3]u8{ 20, 60, 20 } } },
+            });
+        }
+        _ = win.print(&[_]vaxis.Segment{
+            .{ .text = " ", .style = .{ .bg = vaxis.Color{ .rgb = [3]u8{ 20, 60, 20 } } } },
+            .{ .text = msg, .style = .{ .fg = col_selected_fg, .bg = vaxis.Color{ .rgb = [3]u8{ 20, 60, 20 } } } },
+        }, .{ .row_offset = ny, .col_offset = 0, .wrap = .none });
     }
 }
 
@@ -1165,11 +1610,157 @@ fn overlayHints(inner: vaxis.Window, row: u16, segments: []const vaxis.Segment) 
     _ = inner.print(segments, .{ .row_offset = row, .col_offset = 1, .wrap = .none });
 }
 
+// ── Auth overlay ──────────────────────────────────────────────────────────────
+
+fn renderAuthOverlay(win: vaxis.Window, app: *const App) void {
+    const ow: u16 = 64;
+    const service_name: []const u8 = switch (app.auth_service) {
+        .linear => " Connect to Linear ",
+        .github => " Connect to GitHub ",
+        else    => " Connect ",
+    };
+
+    switch (app.auth_mode) {
+        .choose => renderAuthChoose(win, app, ow, service_name),
+        .device_waiting => renderAuthDeviceWaiting(win, app, ow, service_name),
+        .token_input => renderAuthTokenInput(win, app, ow, service_name),
+    }
+}
+
+fn renderAuthChoose(win: vaxis.Window, app: *const App, ow: u16, title: []const u8) void {
+    const oh: u16 = 13;
+    const inner = makeOverlay(win, ow, oh);
+    overlayTitle(inner, title);
+
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = "How would you like to authenticate?", .style = .{ .fg = col_hint_text } },
+    }, .{ .row_offset = 2, .col_offset = 2, .wrap = .none });
+
+    // Option 0 — device flow (GitHub only) or browser PAT (Linear)
+    const opt0_label: []const u8 = switch (app.auth_service) {
+        .github => "Login with GitHub  (opens browser, no copy-paste needed)",
+        .linear => "Open Linear API keys in browser",
+        else    => "Open in browser",
+    };
+    const opt0_sel = app.auth_choose_idx == 0;
+    const opt1_sel = app.auth_choose_idx == 1;
+
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = if (opt0_sel) " >  " else "    ", .style = .{ .fg = if (opt0_sel) col_selected_fg else col_dim_fg, .bg = if (opt0_sel) col_selected_bg else vaxis.Color.default } },
+        .{ .text = opt0_label, .style = .{ .fg = if (opt0_sel) col_selected_fg else col_normal_fg, .bg = if (opt0_sel) col_selected_bg else vaxis.Color.default, .bold = opt0_sel } },
+    }, .{ .row_offset = 4, .col_offset = 0, .wrap = .none });
+
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = if (opt1_sel) " >  " else "    ", .style = .{ .fg = if (opt1_sel) col_selected_fg else col_dim_fg, .bg = if (opt1_sel) col_selected_bg else vaxis.Color.default } },
+        .{ .text = "Paste an API key / personal access token", .style = .{ .fg = if (opt1_sel) col_selected_fg else col_normal_fg, .bg = if (opt1_sel) col_selected_bg else vaxis.Color.default, .bold = opt1_sel } },
+    }, .{ .row_offset = 6, .col_offset = 0, .wrap = .none });
+
+    overlayHints(inner, oh -| 3, &[_]vaxis.Segment{
+        .{ .text = "↑↓/jk",  .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " nav  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "enter",  .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " select  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "esc",    .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " back",  .style = .{ .fg = col_hint_text } },
+    });
+}
+
+fn renderAuthDeviceWaiting(win: vaxis.Window, app: *const App, ow: u16, title: []const u8) void {
+    const oh: u16 = 14;
+    const inner = makeOverlay(win, ow, oh);
+    overlayTitle(inner, title);
+
+    const user_code = app.oauth_user_code_buf[0..app.oauth_user_code_len];
+    const uri       = app.oauth_uri_buf[0..app.oauth_uri_len];
+    const show_uri  = if (uri.len > 0) uri else "github.com/login/device";
+
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = "1.  Your browser has been opened to:", .style = .{ .fg = col_hint_text } },
+    }, .{ .row_offset = 2, .col_offset = 2, .wrap = .none });
+
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = show_uri, .style = .{ .fg = col_active_border, .bold = true } },
+    }, .{ .row_offset = 3, .col_offset = 6, .wrap = .none });
+
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = "2.  Enter this one-time code:", .style = .{ .fg = col_hint_text } },
+    }, .{ .row_offset = 5, .col_offset = 2, .wrap = .none });
+
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = if (user_code.len > 0) user_code else "fetching…",
+           .style = .{ .fg = col_selected_fg, .bold = true } },
+    }, .{ .row_offset = 6, .col_offset = 6, .wrap = .none });
+
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = "Waiting for you to authorise in the browser…", .style = .{ .fg = col_dim_fg, .italic = true } },
+    }, .{ .row_offset = 8, .col_offset = 2, .wrap = .none });
+
+    overlayHints(inner, oh -| 3, &[_]vaxis.Segment{
+        .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " cancel", .style = .{ .fg = col_hint_text } },
+    });
+}
+
+fn renderAuthTokenInput(win: vaxis.Window, app: *const App, ow: u16, title: []const u8) void {
+    const oh: u16 = 14;
+    const inner = makeOverlay(win, ow, oh);
+    overlayTitle(inner, title);
+
+    const instr: []const u8 = switch (app.auth_service) {
+        .linear => "Your browser has opened linear.app/settings/api\nCreate a new token, copy it, then paste it below:",
+        .github => "Create a token at github.com/settings/tokens/new\n(scopes: repo, read:user), then paste it below:",
+        else    => "Paste your API token:",
+    };
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = instr, .style = .{ .fg = col_hint_text } },
+    }, .{ .row_offset = 2, .col_offset = 2, .wrap = .word });
+
+    // Input field background
+    var c: u16 = 2;
+    while (c < ow -| 3) : (c += 1) {
+        inner.writeCell(c, 6, .{
+            .char  = .{ .grapheme = " ", .width = 1 },
+            .style = .{ .bg = col_selected_bg },
+        });
+    }
+
+    // Show token masked (only last 8 visible once longer than field)
+    const field_w: usize = ow -| 6;
+    const token = app.auth_buf[0..app.auth_len];
+    var display_buf: [128]u8 = undefined;
+    const display: []const u8 = blk: {
+        if (token.len == 0) break :blk "";
+        if (token.len <= field_w) break :blk token;
+        const tail = @min(8, token.len);
+        const stars = @min(field_w -| tail, display_buf.len -| tail);
+        @memset(display_buf[0..stars], '*');
+        @memcpy(display_buf[stars .. stars + tail], token[token.len - tail ..]);
+        break :blk display_buf[0 .. stars + tail];
+    };
+
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = display, .style = .{ .fg = col_normal_fg, .bg = col_selected_bg } },
+        .{ .text = "█",     .style = .{ .fg = col_input_prompt, .bg = col_selected_bg } },
+    }, .{ .row_offset = 6, .col_offset = 2, .wrap = .none });
+
+    const hint_text: []const u8 = if (app.auth_len > 0) "Token ready" else "Waiting for token…";
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = hint_text, .style = .{ .fg = col_dim_fg, .italic = true } },
+    }, .{ .row_offset = 8, .col_offset = 2, .wrap = .none });
+
+    overlayHints(inner, oh -| 3, &[_]vaxis.Segment{
+        .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " connect  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "esc",   .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " back", .style = .{ .fg = col_hint_text } },
+    });
+}
+
 // ── Settings overlay ──────────────────────────────────────────────────────────
 
 fn renderSettingsOverlay(win: vaxis.Window, app: *const App) void {
     const ow: u16 = 56;
-    const oh: u16 = 32;
+    const oh: u16 = 40;
     const inner = makeOverlay(win, ow, oh);
     overlayTitle(inner, " Settings");
 
@@ -1329,10 +1920,12 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
     const task = app.currentTask() orelse return;
 
     const ow: u16 = @min(win.width -| 4, 70);
-    // Height: title(1) + gap(1) + status+priority(1) + gap(1) + desc_label(1) + desc(1) +
-    //         gap(1) + subtask_label(1) + subtasks(up to 6) + hints(3) = 13 + subtasks
+    // Height: title(1) + gap(1) + status+priority(1) + [integration(1) + gap(1) if linked] +
+    //         gap(1) + desc_label(1) + desc(1) + gap(1) + subtask_label(1) + subtasks(up to 6) + hints(3)
+    const has_integration = task.external_id.len > 0;
+    const integration_rows: u16 = if (has_integration) 2 else 0; // row + extra gap
     const subtask_rows: u16 = @intCast(@min(task.subtasks.len + 1, 8));
-    const oh: u16 = 13 + subtask_rows;
+    const oh: u16 = 13 + subtask_rows + integration_rows;
 
     const inner = makeOverlay(win, ow, oh);
 
@@ -1374,10 +1967,31 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
         .{ .text = task.priority.toString(), .style = .{ .fg = pr_fg, .bold = true } },
     }, .{ .row_offset = 2, .col_offset = 0, .wrap = .none });
 
+    // Integration row (only when task is linked to an external service)
+    var detail_row: u16 = 4;
+    if (has_integration) {
+        const source_label: []const u8 = switch (task.integration_source) {
+            .linear => "linear",
+            .github => "github",
+            .trello => "trello",
+            .none   => "",
+        };
+        const synced_label = if (task.synced_at.len > 0) task.synced_at else "never";
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = "  Integration  ", .style = .{ .fg = col_hint_text } },
+            .{ .text = source_label,      .style = .{ .fg = col_hint_key,  .bold = true } },
+            .{ .text = "  ",              .style = .{} },
+            .{ .text = task.external_id,  .style = .{ .fg = col_normal_fg } },
+            .{ .text = "  synced ",       .style = .{ .fg = col_dim_fg } },
+            .{ .text = synced_label,      .style = .{ .fg = col_dim_fg } },
+        }, .{ .row_offset = 3, .col_offset = 0, .wrap = .none });
+        detail_row = 6; // shift subsequent rows down by 2
+    }
+
     // Description
     _ = inner.print(&[_]vaxis.Segment{
         .{ .text = "  Description ", .style = .{ .fg = col_hint_text } },
-    }, .{ .row_offset = 4, .col_offset = 0, .wrap = .none });
+    }, .{ .row_offset = detail_row, .col_offset = 0, .wrap = .none });
 
     const is_editing_desc = app.mode == .input and app.input_target == .description;
     if (is_editing_desc) {
@@ -1385,28 +1999,29 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
             .{ .text = "  ", .style = .{} },
             .{ .text = app.inputSlice(), .style = .{ .fg = col_normal_fg } },
             .{ .text = "|", .style = .{ .fg = col_input_prompt } },
-        }, .{ .row_offset = 5, .col_offset = 0, .wrap = .none });
+        }, .{ .row_offset = detail_row + 1, .col_offset = 0, .wrap = .none });
     } else if (task.description.len > 0) {
         _ = inner.print(&[_]vaxis.Segment{
             .{ .text = "  ", .style = .{} },
             .{ .text = task.description, .style = .{ .fg = col_normal_fg } },
-        }, .{ .row_offset = 5, .col_offset = 0, .wrap = .none });
+        }, .{ .row_offset = detail_row + 1, .col_offset = 0, .wrap = .none });
     } else {
         _ = inner.print(&[_]vaxis.Segment{
             .{ .text = "  (none — press e to add)", .style = .{ .fg = col_dim_fg, .italic = true } },
-        }, .{ .row_offset = 5, .col_offset = 0, .wrap = .none });
+        }, .{ .row_offset = detail_row + 1, .col_offset = 0, .wrap = .none });
     }
 
     // Subtasks
     _ = inner.print(&[_]vaxis.Segment{
         .{ .text = "  Subtasks ", .style = .{ .fg = col_hint_text } },
-    }, .{ .row_offset = 7, .col_offset = 0, .wrap = .none });
+    }, .{ .row_offset = detail_row + 3, .col_offset = 0, .wrap = .none });
 
+    const subtask_base_row = detail_row + 4;
     const is_adding_sub = app.mode == .input and app.input_target == .subtask;
     if (task.subtasks.len == 0 and !is_adding_sub) {
         _ = inner.print(&[_]vaxis.Segment{
             .{ .text = "  (none — press a to add)", .style = .{ .fg = col_dim_fg, .italic = true } },
-        }, .{ .row_offset = 8, .col_offset = 0, .wrap = .none });
+        }, .{ .row_offset = subtask_base_row, .col_offset = 0, .wrap = .none });
     } else {
         const max_show: usize = 6;
         const show = @min(task.subtasks.len, max_show);
@@ -1422,10 +2037,10 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
                 .{ .text = if (st.done) "[x] " else "[ ] ", .style = .{ .fg = if (st.done) col_low else col_normal_fg, .bg = bg } },
                 .{ .text = st.title, .style = .{ .fg = if (st.done) col_done_fg else fg,
                     .bg = bg, .strikethrough = st.done } },
-            }, .{ .row_offset = @intCast(8 + vi), .col_offset = 0, .wrap = .none });
+            }, .{ .row_offset = subtask_base_row + @as(u16, @intCast(vi)), .col_offset = 0, .wrap = .none });
         }
         if (is_adding_sub) {
-            const add_row: u16 = @as(u16, 8) + @as(u16, @intCast(@min(show, task.subtasks.len -| scroll)));
+            const add_row = subtask_base_row + @as(u16, @intCast(@min(show, task.subtasks.len -| scroll)));
             _ = inner.print(&[_]vaxis.Segment{
                 .{ .text = "  + ", .style = .{ .fg = col_input_prompt } },
                 .{ .text = app.inputSlice(), .style = .{ .fg = col_normal_fg } },
@@ -1616,10 +2231,19 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer app.deinit();
 
     while (true) {
+        // If device_waiting but no thread running yet, kick off the device flow
+        if (app.mode == .auth_overlay and
+            app.auth_mode == .device_waiting and
+            app.oauth_poll_thread == null)
+        {
+            app.startDeviceFlow(&loop);
+        }
+
         const event = loop.nextEvent();
         switch (event) {
-            .key_press => |key| { if (handleKey(&app, key)) break; },
-            .winsize   => |ws|  { try vx.resize(allocator, ttywriter, ws); },
+            .key_press    => |key| { if (handleKey(&app, key)) break; },
+            .winsize      => |ws|  { try vx.resize(allocator, ttywriter, ws); },
+            .oauth_result => |ev|  { handleOAuthResult(&app, ev); },
         }
         if (app.is_refresh_needed) {
             app.is_refresh_needed = false;

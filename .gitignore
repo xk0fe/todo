@@ -1,2 +1,9 @@
 .zig-cache/
 zig-out/
+
+# Runtime config files that may contain API keys / tokens
+config.toml
+**/.integration.toml
+
+# Local Claude Code session settings
+.claude/
