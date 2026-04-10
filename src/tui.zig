@@ -1373,6 +1373,13 @@ pub fn render(app: *const App, win: vaxis.Window) void {
         const proj_x: i17 = if (app.compact_mode) 0 else @intCast(spaces_w);
         const projects_inner = renderPanel(win, proj_x, 0, projects_w, panel_h,
             " Projects ", app.active == .projects, proj_accent);
+        if (app.compact_mode and app.spaces.len > 0 and app.space_idx < app.spaces.len) {
+            _ = win.print(&[_]vaxis.Segment{
+                .{ .text = "- ",                          .style = .{ .fg = proj_accent, .bold = true } },
+                .{ .text = app.spaces[app.space_idx],     .style = .{ .fg = proj_accent, .bold = true } },
+                .{ .text = " ",                           .style = .{ .fg = proj_accent, .bold = true } },
+            }, .{ .row_offset = 0, .col_offset = @intCast(proj_x + 2 + @as(i17, " Projects ".len)), .wrap = .none });
+        }
         renderProjectList(projects_inner, app.projects, app.project_progress, app.project_colors, app.project_idx,
             app.active == .projects, app.show_progress);
     }
@@ -1381,6 +1388,13 @@ pub fn render(app: *const App, win: vaxis.Window) void {
         const tasks_x: i17 = if (app.compact_mode) 0 else @intCast(spaces_w + projects_w);
         const tasks_inner = renderPanel(win, tasks_x, 0, tasks_w, panel_h,
             " Tasks ", app.active == .tasks, tasks_accent);
+        if (app.compact_mode and app.projects.len > 0 and app.project_idx < app.projects.len) {
+            _ = win.print(&[_]vaxis.Segment{
+                .{ .text = "- ",                              .style = .{ .fg = tasks_accent, .bold = true } },
+                .{ .text = app.projects[app.project_idx],    .style = .{ .fg = tasks_accent, .bold = true } },
+                .{ .text = " ",                              .style = .{ .fg = tasks_accent, .bold = true } },
+            }, .{ .row_offset = 0, .col_offset = @intCast(tasks_x + 2 + @as(i17, " Tasks ".len)), .wrap = .none });
+        }
         renderTasks(tasks_inner, app.tasks, app.task_idx, app.active == .tasks, app.alt_priority, app.task_color_grading);
     }
 
