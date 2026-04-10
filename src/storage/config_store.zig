@@ -13,6 +13,7 @@ pub const GlobalConfig = struct {
     trello_api_key:         []const u8,
     trello_token:           []const u8,
     trello_enabled:         bool,
+    compact_mode:           bool,
 
     pub fn deinit(self: GlobalConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.linear_api_key);
@@ -68,6 +69,7 @@ pub fn loadGlobalConfig(allocator: std.mem.Allocator, root_dir: std.fs.Dir) !Glo
         .trello_api_key         = try allocator.dupe(u8, map.get("trello_api_key") orelse ""),
         .trello_token           = try allocator.dupe(u8, map.get("trello_token") orelse ""),
         .trello_enabled         = std.mem.eql(u8, map.get("trello_enabled") orelse "false", "true"),
+        .compact_mode           = std.mem.eql(u8, map.get("compact_mode") orelse "false", "true"),
     };
 }
 
@@ -81,6 +83,7 @@ fn defaultGlobalConfig(allocator: std.mem.Allocator) !GlobalConfig {
         .trello_api_key         = try allocator.dupe(u8, ""),
         .trello_token           = try allocator.dupe(u8, ""),
         .trello_enabled         = false,
+        .compact_mode           = false,
     };
 }
 
@@ -94,6 +97,7 @@ pub fn saveGlobalConfig(allocator: std.mem.Allocator, root_dir: std.fs.Dir, cfg:
         .{ .key = "trello_api_key",         .value = cfg.trello_api_key },
         .{ .key = "trello_token",           .value = cfg.trello_token },
         .{ .key = "trello_enabled",         .value = if (cfg.trello_enabled) "true" else "false" },
+        .{ .key = "compact_mode",           .value = if (cfg.compact_mode) "true" else "false" },
     };
     const content = try toml.serialize(allocator, &pairs);
     defer allocator.free(content);

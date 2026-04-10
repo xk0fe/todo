@@ -165,7 +165,7 @@ const EntryKind = enum {
     todo,    // placeholder — not yet implemented
 };
 
-const SettingsId = enum { hard_reset, show_progress, alt_priority, task_color_grading, task_sort, linear, github, trello };
+const SettingsId = enum { hard_reset, show_progress, alt_priority, task_color_grading, compact_mode, task_sort, linear, github, trello };
 
 const SettingsEntry = struct {
     kind:  EntryKind,
@@ -185,6 +185,8 @@ const settings_entries = [_]SettingsEntry{
        .sub  = "show ^ ^^ ^^^ ^^^^ instead of [L][M][H][U]" },
     .{ .kind = .toggle,  .id = .task_color_grading,.label = "Task colour grading",
        .sub  = "tint task row by priority level" },
+    .{ .kind = .toggle,  .id = .compact_mode,     .label = "Compact mode",
+       .sub  = "expand the active panel to fill the terminal width" },
     .{ .kind = .section, .label = "Tasks" },
     .{ .kind = .action,  .id = .task_sort,        .label = "Sort order",
        .sub  = "cycle: Default / Priority / Status" },
@@ -271,6 +273,7 @@ const App = struct {
     show_progress:      bool     = true,
     alt_priority:       bool     = false,
     task_color_grading: bool     = false,
+    compact_mode:       bool     = false,
     task_sort:          TaskSort = .by_id,
 
     // color arrays
@@ -321,6 +324,11 @@ const App = struct {
             .allocator = allocator,
             .root_dir  = try paths.openOrCreateTodoRoot(allocator),
         };
+        const cfg = config_store.loadGlobalConfig(allocator, app.root_dir) catch null;
+        if (cfg) |c| {
+            defer c.deinit(allocator);
+            app.compact_mode = c.compact_mode;
+        }
         app.reloadSpaces();
         if (app.spaces.len == 0) {
             app.mode    = .onboarding;
@@ -941,6 +949,15 @@ fn handleSettingsKey(app: *App, key: vaxis.Key) bool {
                     .show_progress      => app.show_progress      = !app.show_progress,
                     .alt_priority       => app.alt_priority       = !app.alt_priority,
                     .task_color_grading => app.task_color_grading = !app.task_color_grading,
+                    .compact_mode       => {
+                        app.compact_mode = !app.compact_mode;
+                        var cfg = config_store.loadGlobalConfig(app.allocator, app.root_dir) catch null;
+                        if (cfg) |*c| {
+                            defer c.deinit(app.allocator);
+                            c.compact_mode = app.compact_mode;
+                            config_store.saveGlobalConfig(app.allocator, app.root_dir, c.*) catch {};
+                        }
+                    },
                     else => {},
                 }
                 app.requestRefresh();
@@ -1330,9 +1347,9 @@ pub fn render(app: *const App, win: vaxis.Window) void {
     }
 
     const panel_h: u16 = win.height -| 4;
-    const spaces_w: u16  = @max(16, win.width * 18 / 100);
-    const projects_w: u16 = @max(18, win.width * 23 / 100);
-    const tasks_w: u16    = win.width -| spaces_w -| projects_w;
+    const spaces_w: u16  = if (app.compact_mode) (if (app.active == .spaces)   win.width else 0) else @max(16, win.width * 18 / 100);
+    const projects_w: u16 = if (app.compact_mode) (if (app.active == .projects) win.width else 0) else @max(18, win.width * 23 / 100);
+    const tasks_w: u16    = if (app.compact_mode) (if (app.active == .tasks)    win.width else 0) else win.width -| spaces_w -| projects_w;
 
     // compute accent colors
     const space_accent = col_active_border;
@@ -1346,20 +1363,26 @@ pub fn render(app: *const App, win: vaxis.Window) void {
     else col_active_border;
 
     // panels (always rendered — overlay draws on top afterwards)
-    const spaces_inner = renderPanel(win, 0, 0, spaces_w, panel_h,
-        " Spaces ", app.active == .spaces, space_accent);
-    renderStringList(spaces_inner, app.spaces, app.space_colors, app.space_idx, app.active == .spaces);
+    if (!app.compact_mode or app.active == .spaces) {
+        const spaces_inner = renderPanel(win, 0, 0, spaces_w, panel_h,
+            " Spaces ", app.active == .spaces, space_accent);
+        renderStringList(spaces_inner, app.spaces, app.space_colors, app.space_idx, app.active == .spaces);
+    }
 
-    const proj_x: i17 = @intCast(spaces_w);
-    const projects_inner = renderPanel(win, proj_x, 0, projects_w, panel_h,
-        " Projects ", app.active == .projects, proj_accent);
-    renderProjectList(projects_inner, app.projects, app.project_progress, app.project_colors, app.project_idx,
-        app.active == .projects, app.show_progress);
+    if (!app.compact_mode or app.active == .projects) {
+        const proj_x: i17 = if (app.compact_mode) 0 else @intCast(spaces_w);
+        const projects_inner = renderPanel(win, proj_x, 0, projects_w, panel_h,
+            " Projects ", app.active == .projects, proj_accent);
+        renderProjectList(projects_inner, app.projects, app.project_progress, app.project_colors, app.project_idx,
+            app.active == .projects, app.show_progress);
+    }
 
-    const tasks_x: i17 = @intCast(spaces_w + projects_w);
-    const tasks_inner = renderPanel(win, tasks_x, 0, tasks_w, panel_h,
-        " Tasks ", app.active == .tasks, tasks_accent);
-    renderTasks(tasks_inner, app.tasks, app.task_idx, app.active == .tasks, app.alt_priority, app.task_color_grading);
+    if (!app.compact_mode or app.active == .tasks) {
+        const tasks_x: i17 = if (app.compact_mode) 0 else @intCast(spaces_w + projects_w);
+        const tasks_inner = renderPanel(win, tasks_x, 0, tasks_w, panel_h,
+            " Tasks ", app.active == .tasks, tasks_accent);
+        renderTasks(tasks_inner, app.tasks, app.task_idx, app.active == .tasks, app.alt_priority, app.task_color_grading);
+    }
 
     renderBottom(win, app, panel_h);
 
