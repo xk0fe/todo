@@ -203,6 +203,7 @@ test "GlobalConfig round-trips through save and load" {
         .trello_api_key         = "trello_key",
         .trello_token           = "trello_tok",
         .trello_enabled         = false,
+        .compact_mode           = false,
     };
 
     try saveGlobalConfig(std.testing.allocator, tmp.dir, original);

@@ -1647,6 +1647,42 @@ fn overlayHints(inner: vaxis.Window, row: u16, segments: []const vaxis.Segment) 
     _ = inner.print(segments, .{ .row_offset = row, .col_offset = 1, .wrap = .none });
 }
 
+fn countTextRows(text: []const u8, max_rows: u16) u16 {
+    if (text.len == 0) return 1;
+
+    var rows: u16 = 1;
+    for (text) |ch| {
+        if (ch == '\n') {
+            if (rows == max_rows) return max_rows;
+            rows += 1;
+        }
+    }
+    return rows;
+}
+
+fn renderIndentedMultiline(inner: vaxis.Window, start_row: u16, text: []const u8, style: vaxis.Style, max_rows: u16) u16 {
+    var rows: u16 = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (rows < max_rows) : (rows += 1) {
+        const line = lines.next() orelse break;
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = "  ", .style = .{} },
+            .{ .text = line, .style = style },
+        }, .{ .row_offset = start_row + rows, .col_offset = 0, .wrap = .none });
+    }
+    return @max(rows, 1);
+}
+
+fn lastVisibleLine(text: []const u8, max_rows: u16) []const u8 {
+    var line: []const u8 = "";
+    var rows: u16 = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (rows < max_rows) : (rows += 1) {
+        line = lines.next() orelse break;
+    }
+    return line;
+}
+
 // ── Auth overlay ──────────────────────────────────────────────────────────────
 
 fn renderAuthOverlay(win: vaxis.Window, app: *const App) void {
@@ -1957,12 +1993,16 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
     const task = app.currentTask() orelse return;
 
     const ow: u16 = @min(win.width -| 4, 70);
+    const max_description_rows: u16 = 5;
+    const is_editing_desc = app.mode == .input and app.input_target == .description;
+    const description_text = if (is_editing_desc) app.inputSlice() else task.description;
+    const description_rows = countTextRows(description_text, max_description_rows);
     // Height: title(1) + gap(1) + status+priority(1) + [integration(1) + gap(1) if linked] +
-    //         gap(1) + desc_label(1) + desc(1) + gap(1) + subtask_label(1) + subtasks(up to 6) + hints(3)
+    //         gap(1) + desc_label(1) + desc rows + gap(1) + subtask_label(1) + subtasks(up to 6) + hints(3)
     const has_integration = task.external_id.len > 0;
     const integration_rows: u16 = if (has_integration) 2 else 0; // row + extra gap
     const subtask_rows: u16 = @intCast(@min(task.subtasks.len + 1, 8));
-    const oh: u16 = 13 + subtask_rows + integration_rows;
+    const oh: u16 = 13 + subtask_rows + integration_rows + (description_rows -| 1);
 
     const inner = makeOverlay(win, ow, oh);
 
@@ -2030,18 +2070,27 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
         .{ .text = "  Description ", .style = .{ .fg = col_hint_text } },
     }, .{ .row_offset = detail_row, .col_offset = 0, .wrap = .none });
 
-    const is_editing_desc = app.mode == .input and app.input_target == .description;
     if (is_editing_desc) {
+        _ = renderIndentedMultiline(
+            inner,
+            detail_row + 1,
+            app.inputSlice(),
+            .{ .fg = col_normal_fg },
+            max_description_rows,
+        );
+        const cursor_line = lastVisibleLine(app.inputSlice(), max_description_rows);
+        const cursor_col: u16 = @intCast(@min(cursor_line.len + 2, @as(usize, ow -| 3)));
         _ = inner.print(&[_]vaxis.Segment{
-            .{ .text = "  ", .style = .{} },
-            .{ .text = app.inputSlice(), .style = .{ .fg = col_normal_fg } },
             .{ .text = "|", .style = .{ .fg = col_input_prompt } },
-        }, .{ .row_offset = detail_row + 1, .col_offset = 0, .wrap = .none });
+        }, .{ .row_offset = detail_row + description_rows, .col_offset = cursor_col, .wrap = .none });
     } else if (task.description.len > 0) {
-        _ = inner.print(&[_]vaxis.Segment{
-            .{ .text = "  ", .style = .{} },
-            .{ .text = task.description, .style = .{ .fg = col_normal_fg } },
-        }, .{ .row_offset = detail_row + 1, .col_offset = 0, .wrap = .none });
+        _ = renderIndentedMultiline(
+            inner,
+            detail_row + 1,
+            task.description,
+            .{ .fg = col_normal_fg },
+            max_description_rows,
+        );
     } else {
         _ = inner.print(&[_]vaxis.Segment{
             .{ .text = "  (none — press e to add)", .style = .{ .fg = col_dim_fg, .italic = true } },
@@ -2049,11 +2098,12 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
     }
 
     // Subtasks
+    const subtask_label_row = detail_row + description_rows + 2;
     _ = inner.print(&[_]vaxis.Segment{
         .{ .text = "  Subtasks ", .style = .{ .fg = col_hint_text } },
-    }, .{ .row_offset = detail_row + 3, .col_offset = 0, .wrap = .none });
+    }, .{ .row_offset = subtask_label_row, .col_offset = 0, .wrap = .none });
 
-    const subtask_base_row = detail_row + 4;
+    const subtask_base_row = subtask_label_row + 1;
     const is_adding_sub = app.mode == .input and app.input_target == .subtask;
     if (task.subtasks.len == 0 and !is_adding_sub) {
         _ = inner.print(&[_]vaxis.Segment{
