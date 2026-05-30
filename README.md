@@ -1,5 +1,7 @@
 # todo
 
+![todo banner](assets/previews/todo-banner-minimal.png)
+
 A terminal task manager written in Zig. Organises work into **Spaces → Projects → Tasks** with a TUI and a CLI.
 
 ## Build
