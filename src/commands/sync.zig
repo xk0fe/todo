@@ -1,40 +1,34 @@
 /// Sync CLI command handlers.
 const std = @import("std");
+const args_util = @import("args.zig");
+const spec = @import("spec.zig");
 const config_store = @import("../storage/config_store.zig");
-const sync_engine  = @import("../integrations/sync.zig");
-
-fn getFlag(args: []const []const u8, flag: []const u8) ?[]const u8 {
-    var i: usize = 0;
-    while (i + 1 < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], flag)) return args[i + 1];
-    }
-    return null;
-}
+const sync_engine = @import("../integrations/sync.zig");
 
 /// todo sync config [--linear-key KEY] [--github-token TOKEN] [--trello-key KEY --trello-token TOKEN]
 pub fn cmdConfig(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     var cfg = try config_store.loadGlobalConfig(allocator, root_dir);
     defer cfg.deinit(allocator);
 
-    if (getFlag(args, "--linear-key")) |key| {
+    if (args_util.getFlag(args, spec.Flag.linear_key)) |key| {
         allocator.free(cfg.linear_api_key);
         cfg.linear_api_key = try allocator.dupe(u8, key);
         cfg.linear_enabled = true;
     }
-    if (getFlag(args, "--github-token")) |tok| {
+    if (args_util.getFlag(args, spec.Flag.github_token)) |tok| {
         allocator.free(cfg.github_token);
         cfg.github_token = try allocator.dupe(u8, tok);
         cfg.github_enabled = true;
     }
-    if (getFlag(args, "--github-client-id")) |id| {
+    if (args_util.getFlag(args, spec.Flag.github_client_id)) |id| {
         allocator.free(cfg.github_oauth_client_id);
         cfg.github_oauth_client_id = try allocator.dupe(u8, id);
     }
-    if (getFlag(args, "--trello-key")) |key| {
+    if (args_util.getFlag(args, spec.Flag.trello_key)) |key| {
         allocator.free(cfg.trello_api_key);
         cfg.trello_api_key = try allocator.dupe(u8, key);
     }
-    if (getFlag(args, "--trello-token")) |tok| {
+    if (args_util.getFlag(args, spec.Flag.trello_token)) |tok| {
         allocator.free(cfg.trello_token);
         cfg.trello_token = try allocator.dupe(u8, tok);
         cfg.trello_enabled = true;
@@ -49,46 +43,46 @@ pub fn cmdConfig(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *st
 ///                                  [--trello-board ID --trello-list-todo L --trello-list-in-progress L --trello-list-in-review L --trello-list-done L]
 pub fn cmdLink(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     if (args.len < 2) return error.MissingArgument;
-    const space   = args[0];
+    const space = args[0];
     const project = args[1];
-    const rest    = if (args.len > 2) args[2..] else &[_][]const u8{};
+    const rest = if (args.len > 2) args[2..] else &[_][]const u8{};
 
     var pi = try config_store.loadProjectIntegration(allocator, root_dir, space, project);
     defer pi.deinit(allocator);
 
-    if (getFlag(rest, "--linear-team")) |id| {
+    if (args_util.getFlag(rest, spec.Flag.linear_team)) |id| {
         allocator.free(pi.linear_team_id);
         pi.linear_team_id = try allocator.dupe(u8, id);
     }
-    if (getFlag(rest, "--linear-project")) |id| {
+    if (args_util.getFlag(rest, spec.Flag.linear_project)) |id| {
         allocator.free(pi.linear_project_id);
         pi.linear_project_id = try allocator.dupe(u8, id);
     }
-    if (getFlag(rest, "--github-owner")) |o| {
+    if (args_util.getFlag(rest, spec.Flag.github_owner)) |o| {
         allocator.free(pi.github_owner);
         pi.github_owner = try allocator.dupe(u8, o);
     }
-    if (getFlag(rest, "--github-repo")) |r| {
+    if (args_util.getFlag(rest, spec.Flag.github_repo)) |r| {
         allocator.free(pi.github_repo);
         pi.github_repo = try allocator.dupe(u8, r);
     }
-    if (getFlag(rest, "--trello-board")) |id| {
+    if (args_util.getFlag(rest, spec.Flag.trello_board)) |id| {
         allocator.free(pi.trello_board_id);
         pi.trello_board_id = try allocator.dupe(u8, id);
     }
-    if (getFlag(rest, "--trello-list-todo")) |id| {
+    if (args_util.getFlag(rest, spec.Flag.trello_list_todo)) |id| {
         allocator.free(pi.trello_list_id_todo);
         pi.trello_list_id_todo = try allocator.dupe(u8, id);
     }
-    if (getFlag(rest, "--trello-list-in-progress")) |id| {
+    if (args_util.getFlag(rest, spec.Flag.trello_list_in_progress)) |id| {
         allocator.free(pi.trello_list_id_in_progress);
         pi.trello_list_id_in_progress = try allocator.dupe(u8, id);
     }
-    if (getFlag(rest, "--trello-list-in-review")) |id| {
+    if (args_util.getFlag(rest, spec.Flag.trello_list_in_review)) |id| {
         allocator.free(pi.trello_list_id_in_review);
         pi.trello_list_id_in_review = try allocator.dupe(u8, id);
     }
-    if (getFlag(rest, "--trello-list-done")) |id| {
+    if (args_util.getFlag(rest, spec.Flag.trello_list_done)) |id| {
         allocator.free(pi.trello_list_id_done);
         pi.trello_list_id_done = try allocator.dupe(u8, id);
     }
@@ -100,7 +94,7 @@ pub fn cmdLink(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.
 /// todo sync linear <space> <project>
 pub fn cmdLinear(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     if (args.len < 2) return error.MissingArgument;
-    const space   = args[0];
+    const space = args[0];
     const project = args[1];
 
     const cfg = try config_store.loadGlobalConfig(allocator, root_dir);
@@ -109,14 +103,13 @@ pub fn cmdLinear(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *st
     defer pi.deinit(allocator);
 
     const result = try sync_engine.syncLinear(allocator, root_dir, space, project, cfg, pi);
-    try writer.print("Linear sync done: {d} created, {d} updated, {d} errors.\n",
-        .{ result.created, result.updated, result.errors });
+    try writer.print("Linear sync done: {d} created, {d} updated, {d} errors.\n", .{ result.created, result.updated, result.errors });
 }
 
 /// todo sync github <space> <project>
 pub fn cmdGitHub(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     if (args.len < 2) return error.MissingArgument;
-    const space   = args[0];
+    const space = args[0];
     const project = args[1];
 
     const cfg = try config_store.loadGlobalConfig(allocator, root_dir);
@@ -125,14 +118,13 @@ pub fn cmdGitHub(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *st
     defer pi.deinit(allocator);
 
     const result = try sync_engine.syncGitHub(allocator, root_dir, space, project, cfg, pi);
-    try writer.print("GitHub sync done: {d} created, {d} updated, {d} errors.\n",
-        .{ result.created, result.updated, result.errors });
+    try writer.print("GitHub sync done: {d} created, {d} updated, {d} errors.\n", .{ result.created, result.updated, result.errors });
 }
 
 /// todo sync trello <space> <project>
 pub fn cmdTrello(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     if (args.len < 2) return error.MissingArgument;
-    const space   = args[0];
+    const space = args[0];
     const project = args[1];
 
     const cfg = try config_store.loadGlobalConfig(allocator, root_dir);
@@ -141,8 +133,7 @@ pub fn cmdTrello(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *st
     defer pi.deinit(allocator);
 
     const result = try sync_engine.syncTrello(allocator, root_dir, space, project, cfg, pi);
-    try writer.print("Trello sync done: {d} created, {d} updated, {d} errors.\n",
-        .{ result.created, result.updated, result.errors });
+    try writer.print("Trello sync done: {d} created, {d} updated, {d} errors.\n", .{ result.created, result.updated, result.errors });
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -194,7 +185,7 @@ test "cmdConfig: --trello-key and --trello-token save to config.toml" {
     std.testing.allocator.free(cfg.trello_api_key);
     std.testing.allocator.free(cfg.trello_token);
     cfg.trello_api_key = try std.testing.allocator.dupe(u8, "trello_key");
-    cfg.trello_token   = try std.testing.allocator.dupe(u8, "trello_tok");
+    cfg.trello_token = try std.testing.allocator.dupe(u8, "trello_tok");
     cfg.trello_enabled = true;
     try config_store.saveGlobalConfig(std.testing.allocator, tmp.dir, cfg);
 
@@ -230,12 +221,12 @@ test "cmdLink: saves github owner/repo to .integration.toml" {
     std.testing.allocator.free(pi.github_owner);
     std.testing.allocator.free(pi.github_repo);
     pi.github_owner = try std.testing.allocator.dupe(u8, "myorg");
-    pi.github_repo  = try std.testing.allocator.dupe(u8, "myrepo");
+    pi.github_repo = try std.testing.allocator.dupe(u8, "myrepo");
     try config_store.saveProjectIntegration(std.testing.allocator, tmp.dir, "work", "api", pi);
 
     const reloaded = try config_store.loadProjectIntegration(std.testing.allocator, tmp.dir, "work", "api");
     defer reloaded.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("myorg",  reloaded.github_owner);
+    try std.testing.expectEqualStrings("myorg", reloaded.github_owner);
     try std.testing.expectEqualStrings("myrepo", reloaded.github_repo);
 }
 
@@ -244,7 +235,7 @@ test "cmdLink: missing space/project args returns MissingArgument" {
     // We test this via simulating the early check
     // (Direct call would need a writer — test the invariant instead)
     const args_empty: []const []const u8 = &.{};
-    const args_one:   []const []const u8 = &.{"work"};
+    const args_one: []const []const u8 = &.{"work"};
     try std.testing.expect(args_empty.len < 2); // would return MissingArgument
-    try std.testing.expect(args_one.len < 2);   // would return MissingArgument
+    try std.testing.expect(args_one.len < 2); // would return MissingArgument
 }

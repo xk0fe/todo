@@ -6,6 +6,8 @@ pub const Status = enum {
     in_review,
     done,
 
+    pub const valid_values = "todo, in-progress, in-review, done";
+
     pub fn fromString(s: []const u8) !Status {
         if (std.mem.eql(u8, s, "todo"))        return .todo;
         if (std.mem.eql(u8, s, "in-progress")) return .in_progress;
@@ -57,6 +59,8 @@ pub const Priority = enum {
     medium,
     high,
     urgent,
+
+    pub const valid_values = "low, medium, high, urgent";
 
     pub fn fromString(s: []const u8) !Priority {
         if (std.mem.eql(u8, s, "low"))    return .low;

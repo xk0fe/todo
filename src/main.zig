@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("cli.zig");
+const model = @import("model.zig");
 const tui = @import("tui.zig");
 
 // Pull all modules into the test binary's compilation unit so their
@@ -66,8 +67,8 @@ pub fn main() void {
             error.NotFound, error.SpaceNotFound => stderr.print("error: space not found.\n", .{}) catch {},
             error.ProjectNotFound => stderr.print("error: project not found.\n", .{}) catch {},
             error.TaskNotFound => stderr.print("error: task not found.\n", .{}) catch {},
-            error.InvalidStatus => stderr.print("error: invalid status. Use: todo, in-progress, in-review, done.\n", .{}) catch {},
-            error.InvalidPriority => stderr.print("error: invalid priority. Use: low, medium, high, urgent.\n", .{}) catch {},
+            error.InvalidStatus => stderr.print("error: invalid status. Use: {s}.\n", .{model.Status.valid_values}) catch {},
+            error.InvalidPriority => stderr.print("error: invalid priority. Use: {s}.\n", .{model.Priority.valid_values}) catch {},
             else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
         }
         std.process.exit(1);

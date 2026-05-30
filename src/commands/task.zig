@@ -1,34 +1,48 @@
 const std = @import("std");
 const model = @import("../model.zig");
 const task_store = @import("../storage/task_store.zig");
+const args_util = @import("args.zig");
+const spec = @import("spec.zig");
 
-fn getFlag(args: []const []const u8, flag: []const u8) ?[]const u8 {
-    var i: usize = 0;
-    while (i + 1 < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], flag)) return args[i + 1];
-    }
-    return null;
+fn parseFilter(s: []const u8) !task_store.TaskFilter {
+    if (args_util.eql(s, spec.task_filter_all)) return .all;
+    const status = model.Status.fromString(s) catch return error.InvalidArgument;
+    return switch (status) {
+        .todo => .todo,
+        .in_progress => .in_progress,
+        .in_review => .in_review,
+        .done => .done,
+    };
+}
+
+test "parseFilter maps public status strings" {
+    try std.testing.expectEqual(task_store.TaskFilter.all, try parseFilter("all"));
+    try std.testing.expectEqual(task_store.TaskFilter.todo, try parseFilter("todo"));
+    try std.testing.expectEqual(task_store.TaskFilter.in_progress, try parseFilter("in-progress"));
+    try std.testing.expectEqual(task_store.TaskFilter.in_review, try parseFilter("in-review"));
+    try std.testing.expectEqual(task_store.TaskFilter.done, try parseFilter("done"));
+    try std.testing.expectError(error.InvalidArgument, parseFilter("blocked"));
 }
 
 pub fn cmdAdd(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     // todo task add <space> <project> <title> [--priority X] [--due DATE] [--description TEXT]
     if (args.len < 3) return error.MissingArgument;
-    const space   = args[0];
+    const space = args[0];
     const project = args[1];
-    const title   = args[2];
+    const title = args[2];
 
-    const priority = if (getFlag(args, "--priority")) |p|
+    const priority = if (args_util.getFlag(args, spec.Flag.priority)) |p|
         try model.Priority.fromString(p)
     else
         model.Priority.medium;
 
-    const due         = getFlag(args, "--due") orelse "";
-    const description = getFlag(args, "--description") orelse getFlag(args, "--notes") orelse "";
+    const due = args_util.getFlag(args, spec.Flag.due) orelse "";
+    const description = args_util.getFlag(args, spec.Flag.description) orelse args_util.getFlag(args, spec.Flag.notes) orelse "";
 
     const id = try task_store.add(allocator, root_dir, space, project, .{
-        .title       = title,
-        .priority    = priority,
-        .due         = due,
+        .title = title,
+        .priority = priority,
+        .due = due,
         .description = description,
     });
     try writer.print("Task #{d} created: {s}\n", .{ id, title });
@@ -37,17 +51,13 @@ pub fn cmdAdd(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.i
 pub fn cmdList(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     // todo task list <space> <project> [--status todo|in-progress|in-review|done|all]
     if (args.len < 2) return error.MissingArgument;
-    const space   = args[0];
+    const space = args[0];
     const project = args[1];
 
-    const filter: task_store.TaskFilter = if (getFlag(args, "--status")) |s| blk: {
-        if (std.mem.eql(u8, s, "all"))         break :blk .all;
-        if (std.mem.eql(u8, s, "done"))        break :blk .done;
-        if (std.mem.eql(u8, s, "in-progress")) break :blk .in_progress;
-        if (std.mem.eql(u8, s, "in-review"))   break :blk .in_review;
-        if (std.mem.eql(u8, s, "todo"))        break :blk .todo;
-        return error.InvalidArgument;
-    } else .active;
+    const filter: task_store.TaskFilter = if (args_util.getFlag(args, spec.Flag.status)) |s|
+        try parseFilter(s)
+    else
+        .active;
 
     const tasks = try task_store.list(allocator, root_dir, space, project, filter);
     defer {
@@ -62,10 +72,10 @@ pub fn cmdList(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.
 
     for (tasks) |t| {
         const status_icon: []const u8 = switch (t.status) {
-            .todo        => "[ ]",
+            .todo => "[ ]",
             .in_progress => "[~]",
-            .in_review   => "[?]",
-            .done        => "[x]",
+            .in_review => "[?]",
+            .done => "[x]",
         };
         const due_str = if (t.due.len > 0) t.due else "-";
         try writer.print("  {s} #{d:0>4}  [{s}]  {s}  due: {s}\n", .{
@@ -83,7 +93,7 @@ pub fn cmdList(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.
 
 pub fn cmdDone(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     if (args.len < 3) return error.MissingArgument;
-    const space   = args[0];
+    const space = args[0];
     const project = args[1];
     const id = std.fmt.parseInt(u32, args[2], 10) catch return error.InvalidArgument;
     try task_store.markDone(allocator, root_dir, space, project, id);
@@ -93,7 +103,7 @@ pub fn cmdDone(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.
 pub fn cmdRemove(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     _ = allocator;
     if (args.len < 3) return error.MissingArgument;
-    const space   = args[0];
+    const space = args[0];
     const project = args[1];
     const id = std.fmt.parseInt(u32, args[2], 10) catch return error.InvalidArgument;
     try task_store.remove(root_dir, space, project, id);
@@ -103,16 +113,16 @@ pub fn cmdRemove(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *st
 pub fn cmdEdit(allocator: std.mem.Allocator, root_dir: std.fs.Dir, writer: *std.io.Writer, args: []const []const u8) !void {
     // todo task edit <space> <project> <id> [--title X] [--priority X] [--status X] [--due X] [--description X]
     if (args.len < 3) return error.MissingArgument;
-    const space   = args[0];
+    const space = args[0];
     const project = args[1];
     const id = std.fmt.parseInt(u32, args[2], 10) catch return error.InvalidArgument;
 
     const opts = task_store.UpdateOptions{
-        .title       = getFlag(args, "--title"),
-        .status      = if (getFlag(args, "--status"))   |s| try model.Status.fromString(s)   else null,
-        .priority    = if (getFlag(args, "--priority")) |p| try model.Priority.fromString(p) else null,
-        .due         = getFlag(args, "--due"),
-        .description = getFlag(args, "--description") orelse getFlag(args, "--notes"),
+        .title = args_util.getFlag(args, spec.Flag.title),
+        .status = if (args_util.getFlag(args, spec.Flag.status)) |s| try model.Status.fromString(s) else null,
+        .priority = if (args_util.getFlag(args, spec.Flag.priority)) |p| try model.Priority.fromString(p) else null,
+        .due = args_util.getFlag(args, spec.Flag.due),
+        .description = args_util.getFlag(args, spec.Flag.description) orelse args_util.getFlag(args, spec.Flag.notes),
     };
 
     try task_store.update(allocator, root_dir, space, project, id, opts);
