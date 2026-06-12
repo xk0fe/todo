@@ -7,9 +7,12 @@ const space_store = @import("storage/space_store.zig");
 const project_store = @import("storage/project_store.zig");
 const task_store = @import("storage/task_store.zig");
 const config_store = @import("storage/config_store.zig");
-const push_queue = @import("storage/push_queue.zig");
-const sync_engine = @import("integrations/sync.zig");
-const github_oauth = @import("integrations/github_oauth.zig");
+const ext_config = @import("storage/ext_config.zig");
+const toml = @import("storage/toml.zig");
+const ext_registry = @import("extensions/registry.zig");
+const ext_runner = @import("extensions/runner.zig");
+const ext_protocol = @import("extensions/protocol.zig");
+const ext_engine = @import("extensions/engine.zig");
 
 // ── Comptime percentage strings (0–100) ──────────────────────────────────────
 // Vaxis stores char.grapheme as a raw pointer; bufPrint'd stack buffers become
@@ -24,210 +27,119 @@ const pct_strs: [101][]const u8 = blk: {
 
 // ── Colour palette ────────────────────────────────────────────────────────────
 
-const col_active_border  = vaxis.Color{ .rgb = [3]u8{ 99, 179, 237 } };
-const col_inactive_border= vaxis.Color{ .rgb = [3]u8{ 70,  70,  70 } };
-const col_selected_fg    = vaxis.Color{ .rgb = [3]u8{ 255, 215,   0 } };
-const col_selected_bg    = vaxis.Color{ .rgb = [3]u8{  35,  38,  55 } };
-const col_normal_fg      = vaxis.Color{ .rgb = [3]u8{ 200, 200, 200 } };
-const col_dim_fg         = vaxis.Color{ .rgb = [3]u8{  85,  85,  85 } };
-const col_hint_key       = vaxis.Color{ .rgb = [3]u8{  99, 179, 237 } };
-const col_hint_text      = vaxis.Color{ .rgb = [3]u8{ 120, 120, 120 } };
-const col_input_prompt   = vaxis.Color{ .rgb = [3]u8{  99, 179, 237 } };
-const col_todo_fg        = vaxis.Color{ .rgb = [3]u8{ 200, 200, 200 } };
-const col_in_progress_fg = vaxis.Color{ .rgb = [3]u8{ 255, 200,  60 } };
-const col_in_review_fg   = vaxis.Color{ .rgb = [3]u8{ 180, 120, 240 } };
-const col_done_fg        = vaxis.Color{ .rgb = [3]u8{  75,  75,  75 } };
-const col_progress_fill  = vaxis.Color{ .rgb = [3]u8{  60, 140,  60 } };
-const col_progress_bg    = vaxis.Color{ .rgb = [3]u8{  40,  40,  40 } };
-const col_low            = vaxis.Color{ .rgb = [3]u8{  90, 200, 110 } };
-const col_medium         = vaxis.Color{ .rgb = [3]u8{ 255, 175,  50 } };
-const col_high           = vaxis.Color{ .rgb = [3]u8{ 240,  90,  90 } };
-const col_urgent         = vaxis.Color{ .rgb = [3]u8{ 220,  30,  80 } };
-const col_overlay_bg     = vaxis.Color{ .rgb = [3]u8{  16,  18,  28 } };
+const col_active_border = vaxis.Color{ .rgb = [3]u8{ 99, 179, 237 } };
+const col_inactive_border = vaxis.Color{ .rgb = [3]u8{ 70, 70, 70 } };
+const col_selected_fg = vaxis.Color{ .rgb = [3]u8{ 255, 215, 0 } };
+const col_selected_bg = vaxis.Color{ .rgb = [3]u8{ 35, 38, 55 } };
+const col_normal_fg = vaxis.Color{ .rgb = [3]u8{ 200, 200, 200 } };
+const col_dim_fg = vaxis.Color{ .rgb = [3]u8{ 85, 85, 85 } };
+const col_hint_key = vaxis.Color{ .rgb = [3]u8{ 99, 179, 237 } };
+const col_hint_text = vaxis.Color{ .rgb = [3]u8{ 120, 120, 120 } };
+const col_input_prompt = vaxis.Color{ .rgb = [3]u8{ 99, 179, 237 } };
+const col_todo_fg = vaxis.Color{ .rgb = [3]u8{ 200, 200, 200 } };
+const col_in_progress_fg = vaxis.Color{ .rgb = [3]u8{ 255, 200, 60 } };
+const col_in_review_fg = vaxis.Color{ .rgb = [3]u8{ 180, 120, 240 } };
+const col_done_fg = vaxis.Color{ .rgb = [3]u8{ 75, 75, 75 } };
+const col_progress_fill = vaxis.Color{ .rgb = [3]u8{ 60, 140, 60 } };
+const col_progress_bg = vaxis.Color{ .rgb = [3]u8{ 40, 40, 40 } };
+const col_low = vaxis.Color{ .rgb = [3]u8{ 90, 200, 110 } };
+const col_medium = vaxis.Color{ .rgb = [3]u8{ 255, 175, 50 } };
+const col_high = vaxis.Color{ .rgb = [3]u8{ 240, 90, 90 } };
+const col_urgent = vaxis.Color{ .rgb = [3]u8{ 220, 30, 80 } };
+const col_overlay_bg = vaxis.Color{ .rgb = [3]u8{ 16, 18, 28 } };
 const col_section_header = vaxis.Color{ .rgb = [3]u8{ 130, 130, 130 } };
-const col_todo_badge     = vaxis.Color{ .rgb = [3]u8{ 100, 100, 170 } };
-const col_warning        = vaxis.Color{ .rgb = [3]u8{ 240,  90,  90 } };
+const col_todo_badge = vaxis.Color{ .rgb = [3]u8{ 100, 100, 170 } };
+const col_warning = vaxis.Color{ .rgb = [3]u8{ 240, 90, 90 } };
 
 fn itemColorToVaxis(c: model.ItemColor) vaxis.Color {
     return switch (c) {
         .default => col_normal_fg,
-        .red     => vaxis.Color{ .rgb = [3]u8{ 220,  70,  70 } },
-        .green   => vaxis.Color{ .rgb = [3]u8{  70, 190,  90 } },
-        .blue    => vaxis.Color{ .rgb = [3]u8{  99, 179, 237 } },
-        .orange  => vaxis.Color{ .rgb = [3]u8{ 255, 150,  50 } },
-        .purple  => vaxis.Color{ .rgb = [3]u8{ 180, 120, 240 } },
-        .cyan    => vaxis.Color{ .rgb = [3]u8{  70, 200, 200 } },
-        .yellow  => vaxis.Color{ .rgb = [3]u8{ 240, 200,  50 } },
+        .red => vaxis.Color{ .rgb = [3]u8{ 220, 70, 70 } },
+        .green => vaxis.Color{ .rgb = [3]u8{ 70, 190, 90 } },
+        .blue => vaxis.Color{ .rgb = [3]u8{ 99, 179, 237 } },
+        .orange => vaxis.Color{ .rgb = [3]u8{ 255, 150, 50 } },
+        .purple => vaxis.Color{ .rgb = [3]u8{ 180, 120, 240 } },
+        .cyan => vaxis.Color{ .rgb = [3]u8{ 70, 200, 200 } },
+        .yellow => vaxis.Color{ .rgb = [3]u8{ 240, 200, 50 } },
     };
-}
-
-// ── OAuth ─────────────────────────────────────────────────────────────────────
-
-/// Posted by the background OAuth poll thread when it finishes.
-const OAuthEvent = struct {
-    token:   ?[]const u8 = null, // heap-owned by this event; save or free
-    err_msg: ?[]const u8 = null, // heap-owned; mutually exclusive with token
-};
-
-/// Context passed to the background OAuth polling thread.
-const OAuthPollCtx = struct {
-    allocator:     std.mem.Allocator,
-    client_id:     [128]u8,
-    client_id_len: usize,
-    device_code:   [512]u8,
-    device_code_len: usize,
-    interval:      i64,
-    cancel:        std.atomic.Value(bool),
-    loop:          *vaxis.Loop(Event),
-};
-
-fn oauthPollThread(ctx: *OAuthPollCtx) void {
-    const client_id   = ctx.client_id[0..ctx.client_id_len];
-    const device_code = ctx.device_code[0..ctx.device_code_len];
-    var   interval_ns: u64 = @intCast(@max(5, ctx.interval) * std.time.ns_per_s);
-
-    while (!ctx.cancel.load(.acquire)) {
-        std.Thread.sleep(interval_ns);
-        if (ctx.cancel.load(.acquire)) return;
-
-        const poll = github_oauth.pollToken(ctx.allocator, client_id, device_code) catch continue;
-        switch (poll) {
-            .token     => |t| {
-                ctx.loop.postEvent(.{ .oauth_result = .{ .token = t } });
-                return;
-            },
-            .slow_down => interval_ns += 5 * std.time.ns_per_s,
-            .expired   => {
-                const msg = ctx.allocator.dupe(u8, "Device code expired. Try again.") catch &[_]u8{};
-                ctx.loop.postEvent(.{ .oauth_result = .{ .err_msg = msg } });
-                return;
-            },
-            .denied    => {
-                const msg = ctx.allocator.dupe(u8, "Access denied.") catch &[_]u8{};
-                ctx.loop.postEvent(.{ .oauth_result = .{ .err_msg = msg } });
-                return;
-            },
-            .err       => |msg| {
-                ctx.loop.postEvent(.{ .oauth_result = .{ .err_msg = msg } });
-                return;
-            },
-            .pending   => {},
-        }
-    }
-}
-
-fn openBrowser(allocator: std.mem.Allocator, url: []const u8) void {
-    const argv: []const []const u8 = switch (builtin.os.tag) {
-        .macos              => &.{ "open", url },
-        .linux, .freebsd    => &.{ "xdg-open", url },
-        .windows            => &.{ "cmd.exe", "/c", "start", url },
-        else                => return,
-    };
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior  = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    _ = child.spawnAndWait() catch {};
 }
 
 // ── Event ─────────────────────────────────────────────────────────────────────
 
 const Event = union(enum) {
-    key_press:    vaxis.Key,
-    winsize:      vaxis.Winsize,
-    oauth_result: OAuthEvent,
+    key_press: vaxis.Key,
+    winsize: vaxis.Winsize,
 };
 
 // ── App modes ─────────────────────────────────────────────────────────────────
 
 const Mode = enum {
     normal,
-    input,                // adding a space / project / task (or subtask/description)
-    settings,             // settings overlay open
-    settings_confirm,     // hard-reset confirmation dialog
-    auth_overlay,         // service authentication input overlay
-    onboarding,           // first-launch wizard
-    task_detail,          // task detail overlay
-    task_confirm_delete,  // confirm before deleting a space/project/task
-    color_picker,         // colour picker overlay for spaces/projects
+    input, // adding a space / project / task (or subtask/description)
+    settings, // settings overlay open
+    settings_confirm, // hard-reset confirmation dialog
+    ext_overlay, // extension config overlay
+    onboarding, // first-launch wizard
+    task_detail, // task detail overlay
+    task_confirm_delete, // confirm before deleting a space/project/task
+    color_picker, // colour picker overlay for spaces/projects
 };
 
 const Panel = enum { spaces, projects, tasks };
 const InputTarget = enum { space, project, task, subtask, description, task_title };
-const AuthMode = enum { choose, device_waiting, token_input };
 
 // ── Settings entries ──────────────────────────────────────────────────────────
 
 const EntryKind = enum {
     section, // non-navigable heading
-    action,  // executable item
-    toggle,  // boolean toggle (uses app state)
-    todo,    // placeholder — not yet implemented
+    action, // executable item
+    toggle, // boolean toggle (uses app state)
 };
 
-const SettingsId = enum { hard_reset, show_progress, alt_priority, task_color_grading, compact_mode, task_sort, linear, github, trello };
+const SettingsId = enum { hard_reset, show_progress, alt_priority, task_color_grading, compact_mode, task_sort, hide_done };
 
 const SettingsEntry = struct {
-    kind:  EntryKind,
-    id:    SettingsId = .hard_reset, // only meaningful for action/toggle/todo
+    kind: EntryKind,
+    id: SettingsId = .hard_reset, // only meaningful for action/toggle
     label: []const u8,
-    sub:   []const u8 = "",
+    sub: []const u8 = "",
 };
 
 const settings_entries = [_]SettingsEntry{
     .{ .kind = .section, .label = "General" },
-    .{ .kind = .action,  .id = .hard_reset,       .label = "Hard Reset",
-       .sub  = "permanently delete all spaces, projects and tasks" },
+    .{ .kind = .action, .id = .hard_reset, .label = "Hard Reset", .sub = "permanently delete all spaces, projects and tasks" },
     .{ .kind = .section, .label = "Display" },
-    .{ .kind = .toggle,  .id = .show_progress,    .label = "Show project progress",
-       .sub  = "display completion % next to each project" },
-    .{ .kind = .toggle,  .id = .alt_priority,     .label = "Alternative priority style",
-       .sub  = "show ^ ^^ ^^^ ^^^^ instead of [L][M][H][U]" },
-    .{ .kind = .toggle,  .id = .task_color_grading,.label = "Task colour grading",
-       .sub  = "tint task row by priority level" },
-    .{ .kind = .toggle,  .id = .compact_mode,     .label = "Compact mode",
-       .sub  = "expand the active panel to fill the terminal width" },
+    .{ .kind = .toggle, .id = .show_progress, .label = "Show project progress", .sub = "display completion % next to each project" },
+    .{ .kind = .toggle, .id = .alt_priority, .label = "Alternative priority style", .sub = "show ^ ^^ ^^^ ^^^^ instead of [L][M][H][U]" },
+    .{ .kind = .toggle, .id = .task_color_grading, .label = "Task colour grading", .sub = "tint task row by priority level" },
+    .{ .kind = .toggle, .id = .compact_mode, .label = "Compact mode", .sub = "expand the active panel to fill the terminal width" },
     .{ .kind = .section, .label = "Tasks" },
-    .{ .kind = .action,  .id = .task_sort,        .label = "Sort order",
-       .sub  = "cycle: Default / Priority / Status" },
-    .{ .kind = .section, .label = "Integrations" },
-    .{ .kind = .todo,    .id = .linear,            .label = "Linear",
-       .sub  = "sync with Linear — run: todo sync linear <space> <project>" },
-    .{ .kind = .todo,    .id = .github,            .label = "GitHub Issues",
-       .sub  = "sync with GitHub — run: todo sync github <space> <project>" },
-    .{ .kind = .todo,    .id = .trello,            .label = "Trello",
-       .sub  = "sync with Trello — run: todo sync trello <space> <project>" },
+    .{ .kind = .toggle, .id = .hide_done, .label = "Hide completed tasks", .sub = "only show todo / in-progress / in-review tasks" },
+    .{ .kind = .action, .id = .task_sort, .label = "Sort order", .sub = "cycle: Default / Priority / Status" },
 };
 
-// First selectable index (skips section headers)
-const settings_initial_idx: usize = blk: {
+const settings_tab_labels = [_][]const u8{ "General", "Display", "Tasks", "Extensions" };
+const settings_tab_count: usize = settings_tab_labels.len;
+/// The Extensions tab lists discovered extension executables instead of
+/// static settings entries.
+const ext_tab_index: usize = 3;
+
+/// Returns the non-section entries belonging to tab index `tab`.
+fn tabEntries(tab: usize) []const SettingsEntry {
+    var section_idx: usize = 0;
+    var start: usize = 0;
     for (settings_entries, 0..) |e, i| {
-        if (e.kind != .section) break :blk i;
+        if (e.kind == .section) {
+            if (section_idx == tab) {
+                start = i + 1;
+            } else if (section_idx == tab + 1) {
+                return settings_entries[start..i];
+            }
+            section_idx += 1;
+        }
     }
-    break :blk 0;
-};
-
-fn isSelectable(e: SettingsEntry) bool {
-    return e.kind != .section;
-}
-
-fn nextSelectableIdx(cur: usize) usize {
-    var i = cur + 1;
-    while (i < settings_entries.len) : (i += 1) {
-        if (isSelectable(settings_entries[i])) return i;
-    }
-    return cur;
-}
-
-fn prevSelectableIdx(cur: usize) usize {
-    if (cur == 0) return cur;
-    var i = cur - 1;
-    while (true) {
-        if (isSelectable(settings_entries[i])) return i;
-        if (i == 0) break;
-        i -= 1;
-    }
-    return cur;
+    if (section_idx > tab) return settings_entries[start..];
+    return &.{};
 }
 
 // ── TaskSort ──────────────────────────────────────────────────────────────────
@@ -247,73 +159,69 @@ fn taskLessThanStatus(_: void, a: model.Task, b: model.Task) bool {
 
 const App = struct {
     allocator: std.mem.Allocator,
-    root_dir:  std.fs.Dir,
+    root_dir: std.fs.Dir,
 
     // main panel state
-    active:      Panel = .spaces,
-    spaces:      [][]const u8 = &.{},
-    space_idx:   usize = 0,
-    projects:    [][]const u8 = &.{},
+    active: Panel = .spaces,
+    spaces: [][]const u8 = &.{},
+    space_idx: usize = 0,
+    projects: [][]const u8 = &.{},
     project_idx: usize = 0,
-    tasks:       []model.Task = &.{},
-    task_idx:    usize = 0,
+    tasks: []model.Task = &.{},
+    task_idx: usize = 0,
 
     // project progress cache (parallel to projects slice)
     project_progress: []u32 = &.{},
 
     // input (add mode in main panels)
-    mode:         Mode = .normal,
+    mode: Mode = .normal,
     input_target: InputTarget = .space,
-    input_buf:    [256]u8 = undefined,
-    input_len:    usize = 0,
+    input_buf: [256]u8 = undefined,
+    input_len: usize = 0,
     is_refresh_needed: bool = false, // force full redraw on next frame
 
     // settings overlay
-    settings_idx:       usize    = settings_initial_idx,
-    show_progress:      bool     = true,
-    alt_priority:       bool     = false,
-    task_color_grading: bool     = false,
-    compact_mode:       bool     = false,
-    task_sort:          TaskSort = .by_id,
+    settings_tab: usize = 0,
+    settings_idx: usize = 0,
+    show_progress: bool = true,
+    alt_priority: bool = false,
+    task_color_grading: bool = false,
+    compact_mode: bool = false,
+    hide_done: bool = false,
+    task_sort: TaskSort = .by_id,
 
     // color arrays
-    space_colors:   []model.ItemColor = &.{},
+    space_colors: []model.ItemColor = &.{},
     project_colors: []model.ItemColor = &.{},
 
     // task detail overlay
     detail_subtask_idx: usize = 0,
 
     // colour picker overlay
-    color_picker_idx:   usize = 0,
+    color_picker_idx: usize = 0,
     color_picker_panel: Panel = .spaces,
 
     // delete confirmation
     confirm_delete_panel: Panel = .tasks,
 
     // onboarding wizard
-    ob_step:      u2 = 0,
+    ob_step: u2 = 0,
     ob_space_buf: [64]u8 = undefined,
     ob_space_len: usize = 0,
-    ob_proj_buf:  [64]u8 = undefined,
-    ob_proj_len:  usize = 0,
+    ob_proj_buf: [64]u8 = undefined,
+    ob_proj_len: usize = 0,
 
-    // auth overlay
-    auth_service:  SettingsId = .linear,
-    auth_mode:     AuthMode = .choose,
-    auth_choose_idx: u1 = 0, // 0 = browser/device, 1 = paste token
-    // token input
-    auth_buf:      [512]u8 = undefined,
-    auth_len:      usize = 0,
-    // OAuth device flow display
-    oauth_user_code_buf: [16]u8 = undefined,
-    oauth_user_code_len: usize = 0,
-    oauth_uri_buf:       [128]u8 = undefined,
-    oauth_uri_len:       usize = 0,
-    // background polling thread
-    oauth_poll_ctx:    ?*OAuthPollCtx = null,
-    oauth_poll_thread: ?std.Thread = null,
+    // extensions tab + config overlay
+    extensions: []ext_registry.ExtRef = &.{},
+    ext_idx: usize = 0,
+    ext_manifest: ?ext_protocol.Manifest = null,
+    ext_cfg_values: [][]u8 = &.{}, // parallel to ext_manifest.config_keys
+    ext_cfg_idx: usize = 0,
+    ext_editing: bool = false,
+    ext_input_buf: [256]u8 = undefined,
+    ext_input_len: usize = 0,
 
-    // sync notification bar (shown at bottom until next keypress)
+    // notification bar (shown at bottom until next keypress)
     notify_buf: [128]u8 = undefined,
     notify_len: usize = 0,
 
@@ -322,7 +230,7 @@ const App = struct {
     fn init(allocator: std.mem.Allocator) !App {
         var app = App{
             .allocator = allocator,
-            .root_dir  = try paths.openOrCreateTodoRoot(allocator),
+            .root_dir = try paths.openOrCreateTodoRoot(allocator),
         };
         const cfg = config_store.loadGlobalConfig(allocator, app.root_dir) catch null;
         if (cfg) |c| {
@@ -331,14 +239,15 @@ const App = struct {
         }
         app.reloadSpaces();
         if (app.spaces.len == 0) {
-            app.mode    = .onboarding;
+            app.mode = .onboarding;
             app.ob_step = 0;
         }
         return app;
     }
 
     fn deinit(self: *App) void {
-        self.stopOAuthPoll();
+        self.closeExtOverlay();
+        self.freeExtensions();
         self.freeSpaces();
         self.freeProjects();
         self.freeTasks();
@@ -347,77 +256,94 @@ const App = struct {
         self.root_dir.close();
     }
 
-    fn stopOAuthPoll(self: *App) void {
-        if (self.oauth_poll_ctx) |ctx| {
-            ctx.cancel.store(true, .release);
-        }
-        if (self.oauth_poll_thread) |t| {
-            t.detach();
-            self.oauth_poll_thread = null;
-        }
-        // ctx leaks intentionally — safe for a CLI tool (single instance, small)
-        self.oauth_poll_ctx = null;
+    fn freeExtensions(self: *App) void {
+        ext_registry.freeList(self.allocator, self.extensions);
+        self.extensions = &.{};
     }
 
-    fn startDeviceFlow(self: *App, loop: *vaxis.Loop(Event)) void {
-        var cfg = config_store.loadGlobalConfig(self.allocator, self.root_dir) catch return;
-        defer cfg.deinit(self.allocator);
+    fn loadExtensions(self: *App) void {
+        self.freeExtensions();
+        self.extensions = ext_registry.list(self.allocator, self.root_dir) catch &.{};
+        if (self.extensions.len > 0 and self.ext_idx >= self.extensions.len)
+            self.ext_idx = self.extensions.len - 1;
+    }
 
-        const client_id = cfg.github_oauth_client_id;
-        if (client_id.len == 0) {
-            self.setNotify("Set github_oauth_client_id in config first (todo sync config --github-client-id ID)", .{});
-            self.auth_mode = .choose;
-            self.requestRefresh();
+    /// Free the open extension overlay's manifest and config values.
+    fn closeExtOverlay(self: *App) void {
+        if (self.ext_manifest) |m| m.deinit(self.allocator);
+        self.ext_manifest = null;
+        for (self.ext_cfg_values) |v| self.allocator.free(v);
+        if (self.ext_cfg_values.len > 0) self.allocator.free(self.ext_cfg_values);
+        self.ext_cfg_values = &.{};
+        self.ext_cfg_idx = 0;
+        self.ext_editing = false;
+        self.ext_input_len = 0;
+    }
+
+    /// Fetch the selected extension's manifest + current config and open the overlay.
+    fn openExtOverlay(self: *App) void {
+        if (self.extensions.len == 0) return;
+        const ref = self.extensions[self.ext_idx];
+
+        const out = ext_runner.run(self.allocator, ref.path, "manifest", null) catch {
+            self.setNotify("Could not run extension '{s}'", .{ref.name});
+            return;
+        };
+        defer out.deinit(self.allocator);
+        if (!out.ok()) {
+            self.setNotify("'{s} manifest' failed (exit {d})", .{ ref.name, out.exit_code });
             return;
         }
-
-        const dc = github_oauth.requestDeviceCode(self.allocator, client_id) catch |err| {
-            self.setNotify("Failed to start device flow: {s}", .{@errorName(err)});
-            self.auth_mode = .choose;
-            self.requestRefresh();
-            return;
-        };
-        defer dc.deinit(self.allocator);
-
-        // Copy display values
-        const uc_len = @min(dc.user_code.len, self.oauth_user_code_buf.len);
-        @memcpy(self.oauth_user_code_buf[0..uc_len], dc.user_code[0..uc_len]);
-        self.oauth_user_code_len = uc_len;
-
-        const uri_len = @min(dc.verification_uri.len, self.oauth_uri_buf.len);
-        @memcpy(self.oauth_uri_buf[0..uri_len], dc.verification_uri[0..uri_len]);
-        self.oauth_uri_len = uri_len;
-
-        // Open the browser
-        openBrowser(self.allocator, dc.verification_uri);
-
-        // Start background poll
-        const ctx = self.allocator.create(OAuthPollCtx) catch return;
-        ctx.cancel = std.atomic.Value(bool).init(false);
-        ctx.allocator = self.allocator;
-        ctx.interval = dc.interval;
-        ctx.loop = loop;
-
-        const cid_len = @min(client_id.len, ctx.client_id.len);
-        @memcpy(ctx.client_id[0..cid_len], client_id[0..cid_len]);
-        ctx.client_id_len = cid_len;
-
-        const dc_len = @min(dc.device_code.len, ctx.device_code.len);
-        @memcpy(ctx.device_code[0..dc_len], dc.device_code[0..dc_len]);
-        ctx.device_code_len = dc_len;
-
-        self.stopOAuthPoll();
-        self.oauth_poll_ctx = ctx;
-        self.oauth_poll_thread = std.Thread.spawn(.{}, oauthPollThread, .{ctx}) catch {
-            self.allocator.destroy(ctx);
-            self.oauth_poll_ctx = null;
-            self.setNotify("Failed to start poll thread", .{});
-            self.auth_mode = .choose;
-            self.requestRefresh();
+        const manifest = ext_protocol.parseManifest(self.allocator, out.stdout) catch {
+            self.setNotify("'{s}' returned an invalid manifest", .{ref.name});
             return;
         };
 
-        self.auth_mode = .device_waiting;
+        var map = ext_config.loadGlobal(self.allocator, self.root_dir, ref.name) catch toml.Map.empty;
+        defer toml.freeMap(self.allocator, &map);
+
+        self.closeExtOverlay();
+        self.ext_manifest = manifest;
+        self.ext_cfg_values = self.allocator.alloc([]u8, manifest.config_keys.len) catch &.{};
+        for (manifest.config_keys, 0..) |ck, i| {
+            if (i >= self.ext_cfg_values.len) break;
+            self.ext_cfg_values[i] = self.allocator.dupe(u8, map.get(ck.key) orelse "") catch @constCast(&[_]u8{});
+        }
+        self.mode = .ext_overlay;
+        self.requestRefresh();
+    }
+
+    /// Import the current project via its linked extension.
+    fn runImport(self: *App) void {
+        const sp = self.currentSpace() orelse return;
+        const pj = self.currentProject() orelse return;
+        const outcome = ext_engine.importProject(self.allocator, self.root_dir, sp, pj) catch |err| {
+            self.setNotify("Import failed: {s}", .{@errorName(err)});
+            return;
+        };
+        defer outcome.deinit(self.allocator);
+        switch (outcome) {
+            .ok => |r| self.setNotify("Import: {d} created, {d} updated, {d} errors", .{ r.created, r.updated, r.errors }),
+            .fail => |msg| self.setNotify("{s}", .{msg[0..@min(msg.len, self.notify_buf.len - 1)]}),
+        }
+        self.reloadTasks();
+        self.recalcProgress();
+        self.requestRefresh();
+    }
+
+    /// Export the current project via its linked extension.
+    fn runExport(self: *App) void {
+        const sp = self.currentSpace() orelse return;
+        const pj = self.currentProject() orelse return;
+        const outcome = ext_engine.exportProject(self.allocator, self.root_dir, sp, pj) catch |err| {
+            self.setNotify("Export failed: {s}", .{@errorName(err)});
+            return;
+        };
+        defer outcome.deinit(self.allocator);
+        switch (outcome) {
+            .ok => |r| self.setNotify("Export: {d} exported, {d} skipped", .{ r.exported, r.skipped }),
+            .fail => |msg| self.setNotify("{s}", .{msg[0..@min(msg.len, self.notify_buf.len - 1)]}),
+        }
         self.requestRefresh();
     }
 
@@ -474,9 +400,14 @@ const App = struct {
     }
     fn reloadProjects(self: *App) void {
         self.freeProjects();
-        if (self.spaces.len == 0) { self.reloadTasks(); return; }
+        if (self.spaces.len == 0) {
+            self.reloadTasks();
+            return;
+        }
         self.projects = project_store.list(
-            self.allocator, self.root_dir, self.spaces[self.space_idx],
+            self.allocator,
+            self.root_dir,
+            self.spaces[self.space_idx],
         ) catch &.{};
         if (self.projects.len > 0 and self.project_idx >= self.projects.len)
             self.project_idx = self.projects.len - 1;
@@ -499,7 +430,10 @@ const App = struct {
         self.project_progress = self.allocator.alloc(u32, self.projects.len) catch return;
         for (self.projects, 0..) |pj, i| {
             self.project_progress[i] = task_store.projectProgress(
-                self.allocator, self.root_dir, sp, pj,
+                self.allocator,
+                self.root_dir,
+                sp,
+                pj,
             );
         }
     }
@@ -507,13 +441,16 @@ const App = struct {
         self.freeTasks();
         if (self.spaces.len == 0 or self.projects.len == 0) return;
         self.tasks = task_store.list(
-            self.allocator, self.root_dir,
-            self.spaces[self.space_idx], self.projects[self.project_idx], .all,
+            self.allocator,
+            self.root_dir,
+            self.spaces[self.space_idx],
+            self.projects[self.project_idx],
+            if (self.hide_done) .active else .all,
         ) catch &.{};
         switch (self.task_sort) {
             .by_id => {},
             .by_priority_desc => std.mem.sort(model.Task, self.tasks, {}, taskLessThanPriority),
-            .by_status        => std.mem.sort(model.Task, self.tasks, {}, taskLessThanStatus),
+            .by_status => std.mem.sort(model.Task, self.tasks, {}, taskLessThanStatus),
         }
         if (self.tasks.len > 0 and self.task_idx >= self.tasks.len)
             self.task_idx = self.tasks.len - 1;
@@ -554,20 +491,28 @@ const App = struct {
                 space_store.add(self.root_dir, text) catch {};
                 self.reloadSpaces();
                 for (self.spaces, 0..) |s, i| {
-                    if (std.mem.eql(u8, s, text)) { self.space_idx = i; break; }
+                    if (std.mem.eql(u8, s, text)) {
+                        self.space_idx = i;
+                        break;
+                    }
                 }
             },
             .project => if (self.currentSpace()) |sp| {
                 project_store.add(self.allocator, self.root_dir, sp, text) catch {};
                 self.reloadProjects();
                 for (self.projects, 0..) |p, i| {
-                    if (std.mem.eql(u8, p, text)) { self.project_idx = i; break; }
+                    if (std.mem.eql(u8, p, text)) {
+                        self.project_idx = i;
+                        break;
+                    }
                 }
             },
             .task => if (self.currentSpace() != null and self.currentProject() != null) {
                 _ = task_store.add(
-                    self.allocator, self.root_dir,
-                    self.currentSpace().?, self.currentProject().?,
+                    self.allocator,
+                    self.root_dir,
+                    self.currentSpace().?,
+                    self.currentProject().?,
                     .{ .title = text },
                 ) catch {};
                 self.reloadTasks();
@@ -578,19 +523,28 @@ const App = struct {
                 if (self.currentSpace() != null and self.currentProject() != null) {
                     // Build new subtask list = old + new
                     var new_subs = self.allocator.alloc(model.SubTask, task.subtasks.len + 1) catch {
-                        self.mode = return_mode; self.input_len = 0; self.requestRefresh(); return;
+                        self.mode = return_mode;
+                        self.input_len = 0;
+                        self.requestRefresh();
+                        return;
                     };
                     defer self.allocator.free(new_subs);
                     for (task.subtasks, 0..) |st, i| new_subs[i] = st;
                     const new_title = self.allocator.dupe(u8, text) catch {
-                        self.mode = return_mode; self.input_len = 0; self.requestRefresh(); return;
+                        self.mode = return_mode;
+                        self.input_len = 0;
+                        self.requestRefresh();
+                        return;
                     };
                     defer self.allocator.free(new_title);
                     new_subs[task.subtasks.len] = .{ .title = new_title, .done = false };
                     task_store.update(
-                        self.allocator, self.root_dir,
-                        self.currentSpace().?, self.currentProject().?,
-                        task.id, .{ .subtasks = new_subs },
+                        self.allocator,
+                        self.root_dir,
+                        self.currentSpace().?,
+                        self.currentProject().?,
+                        task.id,
+                        .{ .subtasks = new_subs },
                     ) catch {};
                     self.reloadTasks();
                     self.detail_subtask_idx = if (self.currentTask()) |t| t.subtasks.len -| 1 else 0;
@@ -599,22 +553,26 @@ const App = struct {
             .description => if (self.currentTask()) |task| {
                 if (self.currentSpace() != null and self.currentProject() != null) {
                     task_store.update(
-                        self.allocator, self.root_dir,
-                        self.currentSpace().?, self.currentProject().?,
-                        task.id, .{ .description = text },
+                        self.allocator,
+                        self.root_dir,
+                        self.currentSpace().?,
+                        self.currentProject().?,
+                        task.id,
+                        .{ .description = text },
                     ) catch {};
                     self.reloadTasks();
                 }
             },
             .task_title => if (self.currentTask()) |task| {
                 if (self.currentSpace() != null and self.currentProject() != null) {
-                    const sp = self.currentSpace().?;
-                    const pj = self.currentProject().?;
                     task_store.update(
-                        self.allocator, self.root_dir, sp, pj,
-                        task.id, .{ .title = text },
+                        self.allocator,
+                        self.root_dir,
+                        self.currentSpace().?,
+                        self.currentProject().?,
+                        task.id,
+                        .{ .title = text },
                     ) catch {};
-                    self.enqueuePush(sp, pj, task, null, text);
                     self.reloadTasks();
                 }
             },
@@ -626,109 +584,10 @@ const App = struct {
 
     fn setNotify(self: *App, comptime fmt: []const u8, args: anytype) void {
         const s = std.fmt.bufPrint(&self.notify_buf, fmt, args) catch {
-            self.notify_len = 0; return;
+            self.notify_len = 0;
+            return;
         };
         self.notify_len = s.len;
-    }
-
-    /// Queue a push for a synced task then flush on next sync.
-    fn enqueuePush(
-        self: *App,
-        space: []const u8,
-        project: []const u8,
-        task: *const model.Task,
-        new_status: ?model.Status,
-        new_title: []const u8,
-    ) void {
-        if (task.external_id.len == 0) return;
-        const src: []const u8 = switch (task.integration_source) {
-            .github => "github",
-            .linear => "linear",
-            .trello => "trello",
-            .none   => return,
-        };
-        // Derive owner/repo from the project name (format: "owner - repo")
-        var owner: []const u8 = "";
-        var repo:  []const u8 = "";
-        if (task.integration_source == .github) {
-            if (std.mem.indexOf(u8, project, " - ")) |idx| {
-                owner = project[0..idx];
-                repo  = project[idx + 3 ..];
-            }
-        }
-        const status_str: []const u8 = if (new_status) |s| s.toString() else "";
-        const entry = push_queue.PushEntry{
-            .space       = space,
-            .project     = project,
-            .external_id = task.external_id,
-            .source      = src,
-            .owner       = owner,
-            .repo        = repo,
-            .new_status  = status_str,
-            .new_title   = new_title,
-        };
-        push_queue.append(self.root_dir, self.allocator, entry) catch {};
-    }
-
-    /// Save the API token from auth_buf, run the full auto-sync, reload data.
-    fn submitAuth(self: *App) void {
-        const token = self.auth_buf[0..self.auth_len];
-        if (token.len == 0) {
-            self.mode = .settings;
-            self.requestRefresh();
-            return;
-        }
-
-        var cfg = config_store.loadGlobalConfig(self.allocator, self.root_dir) catch {
-            self.setNotify("Error: could not load config", .{});
-            self.mode = .settings;
-            self.requestRefresh();
-            return;
-        };
-        defer cfg.deinit(self.allocator);
-
-        switch (self.auth_service) {
-            .linear => {
-                self.allocator.free(cfg.linear_api_key);
-                cfg.linear_api_key = self.allocator.dupe(u8, token) catch return;
-                cfg.linear_enabled = true;
-            },
-            .github => {
-                self.allocator.free(cfg.github_token);
-                cfg.github_token = self.allocator.dupe(u8, token) catch return;
-                cfg.github_enabled = true;
-            },
-            else => { self.mode = .settings; self.requestRefresh(); return; },
-        }
-
-        config_store.saveGlobalConfig(self.allocator, self.root_dir, cfg) catch {
-            self.setNotify("Error: could not save config", .{});
-            self.mode = .settings;
-            self.requestRefresh();
-            return;
-        };
-
-        // Flush any queued local changes before pulling remote
-        sync_engine.flushPushQueue(self.allocator, self.root_dir, cfg);
-
-        const result: sync_engine.SyncResult = switch (self.auth_service) {
-            .linear => sync_engine.autoSyncLinear(self.allocator, self.root_dir, cfg),
-            .github => sync_engine.autoSyncGitHub(self.allocator, self.root_dir, cfg),
-            else    => unreachable,
-        } catch |err| {
-            self.setNotify("Sync failed: {s}", .{@errorName(err)});
-            self.reloadSpaces();
-            self.mode = .settings;
-            self.requestRefresh();
-            return;
-        };
-
-        self.setNotify("Sync complete: {d} created, {d} updated, {d} errors",
-            .{ result.created, result.updated, result.errors });
-        self.reloadSpaces();
-        self.mode = .settings;
-        self.auth_len = 0;
-        self.requestRefresh();
     }
 
     fn hardReset(self: *App) void {
@@ -744,10 +603,10 @@ const App = struct {
         self.root_dir = paths.openOrCreateTodoRoot(self.allocator) catch return;
         self.reloadSpaces(); // everything empty after reset
 
-        self.mode      = .onboarding;
-        self.ob_step   = 0;
+        self.mode = .onboarding;
+        self.ob_step = 0;
         self.ob_space_len = 0;
-        self.ob_proj_len  = 0;
+        self.ob_proj_len = 0;
     }
 };
 
@@ -784,15 +643,15 @@ fn handleKey(app: *App, key: vaxis.Key) bool {
     app.notify_len = 0;
 
     switch (app.mode) {
-        .input                => return handleInputKey(app, key),
-        .settings             => return handleSettingsKey(app, key),
-        .settings_confirm     => return handleSettingsConfirmKey(app, key),
-        .auth_overlay         => return handleAuthOverlayKey(app, key),
-        .onboarding           => return handleOnboardingKey(app, key),
-        .task_detail          => return handleTaskDetailKey(app, key),
-        .task_confirm_delete  => return handleConfirmDeleteKey(app, key),
-        .color_picker         => return handleColorPickerKey(app, key),
-        .normal               => {},
+        .input => return handleInputKey(app, key),
+        .settings => return handleSettingsKey(app, key),
+        .settings_confirm => return handleSettingsConfirmKey(app, key),
+        .ext_overlay => return handleExtOverlayKey(app, key),
+        .onboarding => return handleOnboardingKey(app, key),
+        .task_detail => return handleTaskDetailKey(app, key),
+        .task_confirm_delete => return handleConfirmDeleteKey(app, key),
+        .color_picker => return handleColorPickerKey(app, key),
+        .normal => {},
     }
 
     // quit
@@ -800,8 +659,9 @@ fn handleKey(app: *App, key: vaxis.Key) bool {
 
     // open settings
     if (key.matches('s', .{})) {
-        app.mode         = .settings;
-        app.settings_idx = settings_initial_idx;
+        app.mode = .settings;
+        app.settings_tab = 0;
+        app.settings_idx = 0;
         app.requestRefresh();
         return false;
     }
@@ -809,30 +669,50 @@ fn handleKey(app: *App, key: vaxis.Key) bool {
     // switch panels: tab / shift+tab, h/l, ←/→
     if (key.matches(vaxis.Key.tab, .{}) or key.matches('l', .{}) or key.matches(vaxis.Key.right, .{})) {
         app.active = switch (app.active) {
-            .spaces => .projects, .projects => .tasks, .tasks => .tasks,
+            .spaces => .projects,
+            .projects => .tasks,
+            .tasks => .tasks,
         };
     }
     if (key.matches(vaxis.Key.tab, .{ .shift = true }) or key.matches('h', .{}) or key.matches(vaxis.Key.left, .{})) {
         app.active = switch (app.active) {
-            .spaces => .spaces, .projects => .spaces, .tasks => .projects,
+            .spaces => .spaces,
+            .projects => .spaces,
+            .tasks => .projects,
         };
     }
 
     // navigate up
     if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
         switch (app.active) {
-            .spaces   => if (app.space_idx > 0)   { app.space_idx   -= 1; app.reloadProjects(); },
-            .projects => if (app.project_idx > 0) { app.project_idx -= 1; app.reloadTasks(); },
-            .tasks    => if (app.task_idx > 0)    { app.task_idx    -= 1; },
+            .spaces => if (app.space_idx > 0) {
+                app.space_idx -= 1;
+                app.reloadProjects();
+            },
+            .projects => if (app.project_idx > 0) {
+                app.project_idx -= 1;
+                app.reloadTasks();
+            },
+            .tasks => if (app.task_idx > 0) {
+                app.task_idx -= 1;
+            },
         }
     }
 
     // navigate down
     if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
         switch (app.active) {
-            .spaces   => if (app.space_idx   + 1 < app.spaces.len)   { app.space_idx   += 1; app.reloadProjects(); },
-            .projects => if (app.project_idx + 1 < app.projects.len) { app.project_idx += 1; app.reloadTasks(); },
-            .tasks    => if (app.task_idx    + 1 < app.tasks.len)    { app.task_idx    += 1; },
+            .spaces => if (app.space_idx + 1 < app.spaces.len) {
+                app.space_idx += 1;
+                app.reloadProjects();
+            },
+            .projects => if (app.project_idx + 1 < app.projects.len) {
+                app.project_idx += 1;
+                app.reloadTasks();
+            },
+            .tasks => if (app.task_idx + 1 < app.tasks.len) {
+                app.task_idx += 1;
+            },
         }
     }
 
@@ -840,7 +720,9 @@ fn handleKey(app: *App, key: vaxis.Key) bool {
     if (key.matches('a', .{})) {
         app.mode = .input;
         app.input_target = switch (app.active) {
-            .spaces => .space, .projects => .project, .tasks => .task,
+            .spaces => .space,
+            .projects => .project,
+            .tasks => .task,
         };
         app.input_len = 0;
     }
@@ -853,9 +735,9 @@ fn handleKey(app: *App, key: vaxis.Key) bool {
         } else {
             // show confirmation dialog
             const has_target = switch (app.active) {
-                .spaces   => app.currentSpace() != null,
+                .spaces => app.currentSpace() != null,
                 .projects => app.currentProject() != null,
-                .tasks    => app.tasks.len > 0,
+                .tasks => app.tasks.len > 0,
             };
             if (has_target) {
                 app.confirm_delete_panel = app.active;
@@ -870,16 +752,20 @@ fn handleKey(app: *App, key: vaxis.Key) bool {
         switch (app.active) {
             .spaces => if (app.spaces.len > 0) {
                 const cur: model.ItemColor = if (app.space_idx < app.space_colors.len)
-                    app.space_colors[app.space_idx] else .default;
-                app.color_picker_idx   = @intFromEnum(cur);
+                    app.space_colors[app.space_idx]
+                else
+                    .default;
+                app.color_picker_idx = @intFromEnum(cur);
                 app.color_picker_panel = .spaces;
                 app.mode = .color_picker;
                 app.requestRefresh();
             },
             .projects => if (app.projects.len > 0) {
                 const cur: model.ItemColor = if (app.project_idx < app.project_colors.len)
-                    app.project_colors[app.project_idx] else .default;
-                app.color_picker_idx   = @intFromEnum(cur);
+                    app.project_colors[app.project_idx]
+                else
+                    .default;
+                app.color_picker_idx = @intFromEnum(cur);
                 app.color_picker_panel = .projects;
                 app.mode = .color_picker;
                 app.requestRefresh();
@@ -892,19 +778,55 @@ fn handleKey(app: *App, key: vaxis.Key) bool {
         }
     }
 
+    // import / export the current project via its linked extension
+    if (key.matches('i', .{})) {
+        app.runImport();
+    }
+    if (key.matches('I', .{ .shift = true })) {
+        app.runExport();
+    }
+
     // status / priority shortcuts work directly in tasks panel too
     if (app.active == .tasks and app.tasks.len > 0) {
         if (app.currentSpace()) |sp| if (app.currentProject()) |pj| {
             const task = &app.tasks[app.task_idx];
-            if (key.matches(']', .{})) { applyStatusChange(app, sp, pj, task, task.status.next()); }
-            if (key.matches('[', .{})) { applyStatusChange(app, sp, pj, task, task.status.prev()); }
-            if (key.matches('}', .{})) { applyPriorityChange(app, sp, pj, task, task.priority.next()); }
-            if (key.matches('{', .{})) { applyPriorityChange(app, sp, pj, task, task.priority.prev()); }
-            if (key.matches('X', .{ .shift = true })) { applyStatusChange(app, sp, pj, task, .done); }
+            if (key.matches(']', .{})) {
+                applyStatusChange(app, sp, pj, task, task.status.next());
+            }
+            if (key.matches('[', .{})) {
+                applyStatusChange(app, sp, pj, task, task.status.prev());
+            }
+            if (key.matches('}', .{})) {
+                applyPriorityChange(app, sp, pj, task, task.priority.next());
+            }
+            if (key.matches('{', .{})) {
+                applyPriorityChange(app, sp, pj, task, task.priority.prev());
+            }
+            if (key.matches('X', .{ .shift = true })) {
+                applyStatusChange(app, sp, pj, task, .done);
+            }
+            if (key.matches('o', .{})) {
+                openTaskUrl(app.allocator, task);
+            }
         };
     }
 
     return false;
+}
+
+fn openTaskUrl(allocator: std.mem.Allocator, task: *const model.Task) void {
+    if (task.url.len == 0) return;
+    const argv: []const []const u8 = if (builtin.os.tag == .macos)
+        &.{ "open", task.url }
+    else if (builtin.os.tag == .windows)
+        &.{ "cmd", "/c", "start", task.url }
+    else
+        &.{ "xdg-open", task.url };
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch {};
 }
 
 fn handleInputKey(app: *App, key: vaxis.Key) bool {
@@ -917,7 +839,10 @@ fn handleInputKey(app: *App, key: vaxis.Key) bool {
         app.requestRefresh();
         return false;
     }
-    if (key.matches(vaxis.Key.enter, .{}))   { app.commitInput(); return false; }
+    if (key.matches(vaxis.Key.enter, .{})) {
+        app.commitInput();
+        return false;
+    }
     if (key.matches(vaxis.Key.backspace, .{})) {
         if (app.input_len > 0) app.input_len -= 1;
         return false;
@@ -932,24 +857,77 @@ fn handleInputKey(app: *App, key: vaxis.Key) bool {
 }
 
 fn handleSettingsKey(app: *App, key: vaxis.Key) bool {
-    if (key.matches(vaxis.Key.escape, .{})) { app.mode = .normal; app.requestRefresh(); return false; }
+    if (key.matches(vaxis.Key.escape, .{})) {
+        app.mode = .normal;
+        app.requestRefresh();
+        return false;
+    }
+
+    // Tab switching with h/l or left/right
+    if (key.matches('h', .{}) or key.matches(vaxis.Key.left, .{})) {
+        if (app.settings_tab > 0) {
+            app.settings_tab -= 1;
+            const te = tabEntries(app.settings_tab);
+            if (app.settings_idx >= te.len) app.settings_idx = if (te.len > 0) te.len - 1 else 0;
+        }
+        app.requestRefresh();
+        return false;
+    }
+    if (key.matches('l', .{}) or key.matches(vaxis.Key.right, .{})) {
+        if (app.settings_tab + 1 < settings_tab_count) {
+            app.settings_tab += 1;
+            if (app.settings_tab == ext_tab_index) {
+                app.loadExtensions();
+            } else {
+                const te = tabEntries(app.settings_tab);
+                if (app.settings_idx >= te.len) app.settings_idx = if (te.len > 0) te.len - 1 else 0;
+            }
+        }
+        app.requestRefresh();
+        return false;
+    }
+
+    // Entry navigation within the current tab
     if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-        app.settings_idx = prevSelectableIdx(app.settings_idx);
+        if (app.settings_tab == ext_tab_index) {
+            if (app.ext_idx > 0) app.ext_idx -= 1;
+        } else if (app.settings_idx > 0) app.settings_idx -= 1;
+        app.requestRefresh();
         return false;
     }
     if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-        app.settings_idx = nextSelectableIdx(app.settings_idx);
+        if (app.settings_tab == ext_tab_index) {
+            if (app.extensions.len > 0 and app.ext_idx + 1 < app.extensions.len) app.ext_idx += 1;
+        } else {
+            const te = tabEntries(app.settings_tab);
+            if (app.settings_idx + 1 < te.len) app.settings_idx += 1;
+        }
+        app.requestRefresh();
         return false;
     }
+
     if (key.matches(vaxis.Key.enter, .{})) {
-        const entry = settings_entries[app.settings_idx];
+        if (app.settings_tab == ext_tab_index) {
+            app.openExtOverlay();
+            return false;
+        }
+        const te = tabEntries(app.settings_tab);
+        if (app.settings_idx >= te.len) {
+            app.requestRefresh();
+            return false;
+        }
+        const entry = te[app.settings_idx];
         switch (entry.kind) {
             .toggle => {
                 switch (entry.id) {
-                    .show_progress      => app.show_progress      = !app.show_progress,
-                    .alt_priority       => app.alt_priority       = !app.alt_priority,
+                    .show_progress => app.show_progress = !app.show_progress,
+                    .alt_priority => app.alt_priority = !app.alt_priority,
                     .task_color_grading => app.task_color_grading = !app.task_color_grading,
-                    .compact_mode       => {
+                    .hide_done => {
+                        app.hide_done = !app.hide_done;
+                        app.reloadTasks();
+                    },
+                    .compact_mode => {
                         app.compact_mode = !app.compact_mode;
                         var cfg = config_store.loadGlobalConfig(app.allocator, app.root_dir) catch null;
                         if (cfg) |*c| {
@@ -964,39 +942,13 @@ fn handleSettingsKey(app: *App, key: vaxis.Key) bool {
             },
             .action => switch (entry.id) {
                 .hard_reset => app.mode = .settings_confirm,
-                .task_sort  => {
+                .task_sort => {
                     app.task_sort = switch (app.task_sort) {
-                        .by_id           => .by_priority_desc,
+                        .by_id => .by_priority_desc,
                         .by_priority_desc => .by_status,
-                        .by_status       => .by_id,
+                        .by_status => .by_id,
                     };
                     app.reloadTasks();
-                    app.requestRefresh();
-                },
-                else => {},
-            },
-            .todo => switch (entry.id) {
-                .linear, .github => {
-                    app.auth_service = entry.id;
-                    app.auth_mode = .choose;
-                    app.auth_choose_idx = 0;
-                    app.auth_len = 0;
-                    // Pre-fill with existing token so user can see it's set
-                    const cfg = config_store.loadGlobalConfig(app.allocator, app.root_dir) catch {
-                        app.mode = .auth_overlay;
-                        app.requestRefresh();
-                        return false;
-                    };
-                    defer cfg.deinit(app.allocator);
-                    const existing: []const u8 = switch (entry.id) {
-                        .linear => cfg.linear_api_key,
-                        .github => cfg.github_token,
-                        else    => "",
-                    };
-                    const copy_len = @min(existing.len, app.auth_buf.len);
-                    @memcpy(app.auth_buf[0..copy_len], existing[0..copy_len]);
-                    app.auth_len = copy_len;
-                    app.mode = .auth_overlay;
                     app.requestRefresh();
                 },
                 else => {},
@@ -1008,127 +960,107 @@ fn handleSettingsKey(app: *App, key: vaxis.Key) bool {
     return false;
 }
 
-fn handleAuthOverlayKey(app: *App, key: vaxis.Key) bool {
-    if (key.matches(vaxis.Key.escape, .{})) {
-        switch (app.auth_mode) {
-            .choose => { app.mode = .settings; },
-            .device_waiting => {
-                app.stopOAuthPoll();
-                app.auth_mode = .choose;
-            },
-            .token_input => { app.auth_mode = .choose; },
-        }
+fn handleExtOverlayKey(app: *App, key: vaxis.Key) bool {
+    const manifest = app.ext_manifest orelse {
+        app.mode = .settings;
         app.requestRefresh();
+        return false;
+    };
+
+    if (app.ext_editing) {
+        if (key.matches(vaxis.Key.escape, .{})) {
+            app.ext_editing = false;
+            app.ext_input_len = 0;
+            app.requestRefresh();
+            return false;
+        }
+        if (key.matches(vaxis.Key.enter, .{})) {
+            // Persist the edited value for the selected config key.
+            if (app.ext_cfg_idx < manifest.config_keys.len and app.ext_cfg_idx < app.ext_cfg_values.len) {
+                const ck = manifest.config_keys[app.ext_cfg_idx];
+                const value = app.ext_input_buf[0..app.ext_input_len];
+                const ext_name = app.extensions[app.ext_idx].name;
+                ext_config.setGlobalValue(app.allocator, app.root_dir, ext_name, ck.key, value) catch {
+                    app.setNotify("Could not save config", .{});
+                };
+                if (app.allocator.dupe(u8, value)) |copy| {
+                    app.allocator.free(app.ext_cfg_values[app.ext_cfg_idx]);
+                    app.ext_cfg_values[app.ext_cfg_idx] = copy;
+                } else |_| {}
+            }
+            app.ext_editing = false;
+            app.ext_input_len = 0;
+            app.requestRefresh();
+            return false;
+        }
+        if (key.matches(vaxis.Key.backspace, .{})) {
+            if (app.ext_input_len > 0) app.ext_input_len -= 1;
+            app.requestRefresh();
+            return false;
+        }
+        if (key.text) |t| {
+            if (app.ext_input_len + t.len <= app.ext_input_buf.len) {
+                @memcpy(app.ext_input_buf[app.ext_input_len..][0..t.len], t);
+                app.ext_input_len += t.len;
+            }
+            app.requestRefresh();
+        }
         return false;
     }
 
-    switch (app.auth_mode) {
-        .choose => {
-            if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-                app.auth_choose_idx = 0;
-                app.requestRefresh();
-            } else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-                app.auth_choose_idx = 1;
-                app.requestRefresh();
-            } else if (key.matches(vaxis.Key.enter, .{})) {
-                const want_device_flow = app.auth_service == .github and app.auth_choose_idx == 0;
-                if (want_device_flow) {
-                    // Signals run() to call startDeviceFlow on the next iteration
-                    app.auth_mode = .device_waiting;
-                } else {
-                    // Token paste path
-                    if (app.auth_service == .linear and app.auth_choose_idx == 0) {
-                        openBrowser(app.allocator, "https://linear.app/settings/api");
-                    }
-                    app.auth_mode = .token_input;
-                }
-                app.requestRefresh();
-            }
-        },
-        .device_waiting => {
-            // No keys do anything while polling except Esc (handled above)
-        },
-        .token_input => {
-            if (key.matches(vaxis.Key.enter, .{})) {
-                app.submitAuth();
-            } else if (key.matches(vaxis.Key.backspace, .{})) {
-                if (app.auth_len > 0) app.auth_len -= 1;
-                app.requestRefresh();
-            } else if (key.text) |t| {
-                for (t) |ch| {
-                    if (app.auth_len < app.auth_buf.len) {
-                        app.auth_buf[app.auth_len] = ch;
-                        app.auth_len += 1;
-                    }
-                }
-                app.requestRefresh();
-            }
-        },
+    if (key.matches(vaxis.Key.escape, .{})) {
+        app.closeExtOverlay();
+        app.mode = .settings;
+        app.requestRefresh();
+        return false;
+    }
+    if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+        if (app.ext_cfg_idx > 0) app.ext_cfg_idx -= 1;
+        app.requestRefresh();
+        return false;
+    }
+    if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+        if (manifest.config_keys.len > 0 and app.ext_cfg_idx + 1 < manifest.config_keys.len)
+            app.ext_cfg_idx += 1;
+        app.requestRefresh();
+        return false;
+    }
+    if (key.matches(vaxis.Key.enter, .{})) {
+        if (app.ext_cfg_idx < app.ext_cfg_values.len) {
+            const current = app.ext_cfg_values[app.ext_cfg_idx];
+            const copy_len = @min(current.len, app.ext_input_buf.len);
+            @memcpy(app.ext_input_buf[0..copy_len], current[0..copy_len]);
+            app.ext_input_len = copy_len;
+            app.ext_editing = true;
+            app.requestRefresh();
+        }
+        return false;
     }
     return false;
 }
 
-fn handleOAuthResult(app: *App, ev: OAuthEvent) void {
-    app.stopOAuthPoll();
-
-    if (ev.token) |token| {
-        defer app.allocator.free(token);
-        // Save the token the same way submitAuth does
-        var cfg = config_store.loadGlobalConfig(app.allocator, app.root_dir) catch {
-            app.setNotify("Error: could not load config", .{});
-            app.auth_mode = .choose;
-            app.mode = .settings;
-            app.requestRefresh();
-            return;
-        };
-        defer cfg.deinit(app.allocator);
-
-        app.allocator.free(cfg.github_token);
-        cfg.github_token = app.allocator.dupe(u8, token) catch return;
-        cfg.github_enabled = true;
-
-        config_store.saveGlobalConfig(app.allocator, app.root_dir, cfg) catch {
-            app.setNotify("Error: could not save config", .{});
-            app.auth_mode = .choose;
-            app.mode = .settings;
-            app.requestRefresh();
-            return;
-        };
-
-        sync_engine.flushPushQueue(app.allocator, app.root_dir, cfg);
-
-        const result = sync_engine.autoSyncGitHub(app.allocator, app.root_dir, cfg) catch |err| {
-            app.setNotify("Sync failed: {s}", .{@errorName(err)});
-            app.reloadSpaces();
-            app.auth_mode = .choose;
-            app.mode = .settings;
-            app.requestRefresh();
-            return;
-        };
-        app.setNotify("GitHub connected! Sync: {d} created, {d} updated", .{ result.created, result.updated });
-        app.reloadSpaces();
-    } else if (ev.err_msg) |msg| {
-        defer app.allocator.free(msg);
-        app.setNotify("OAuth failed: {s}", .{msg});
-    } else {
-        app.setNotify("OAuth cancelled.", .{});
-    }
-
-    app.auth_mode = .choose;
-    app.mode = .settings;
-    app.requestRefresh();
-}
-
 fn handleSettingsConfirmKey(app: *App, key: vaxis.Key) bool {
-    if (key.matches(vaxis.Key.escape, .{})) { app.mode = .settings; app.requestRefresh(); return false; }
-    if (key.matches(vaxis.Key.enter, .{}))  { app.hardReset(); app.requestRefresh(); return false; }
+    if (key.matches(vaxis.Key.escape, .{})) {
+        app.mode = .settings;
+        app.requestRefresh();
+        return false;
+    }
+    if (key.matches(vaxis.Key.enter, .{})) {
+        app.hardReset();
+        app.requestRefresh();
+        return false;
+    }
     return false;
 }
 
 fn handleConfirmDeleteKey(app: *App, key: vaxis.Key) bool {
-    if (key.matches(vaxis.Key.escape, .{})) { app.mode = .normal; app.requestRefresh(); return false; }
+    if (key.matches(vaxis.Key.escape, .{})) {
+        app.mode = .normal;
+        app.requestRefresh();
+        return false;
+    }
     if (key.matches(vaxis.Key.enter, .{})) {
-        deleteCurrentItem(app);  // already calls requestRefresh()
+        deleteCurrentItem(app); // already calls requestRefresh()
         app.mode = .normal;
     }
     return false;
@@ -1172,7 +1104,6 @@ fn handleColorPickerKey(app: *App, key: vaxis.Key) bool {
 fn applyStatusChange(app: *App, sp: []const u8, pj: []const u8, task: *const model.Task, new_status: ?model.Status) void {
     if (new_status) |s| {
         task_store.update(app.allocator, app.root_dir, sp, pj, task.id, .{ .status = s }) catch {};
-        app.enqueuePush(sp, pj, task, s, "");
         app.reloadTasks();
         app.recalcProgress();
         app.requestRefresh();
@@ -1188,18 +1119,46 @@ fn applyPriorityChange(app: *App, sp: []const u8, pj: []const u8, task: *const m
 }
 
 fn handleTaskDetailKey(app: *App, key: vaxis.Key) bool {
-    if (key.matches(vaxis.Key.escape, .{})) { app.mode = .normal; app.requestRefresh(); return false; }
+    if (key.matches(vaxis.Key.escape, .{})) {
+        app.mode = .normal;
+        app.requestRefresh();
+        return false;
+    }
 
-    const task = app.currentTask() orelse { app.mode = .normal; app.requestRefresh(); return false; };
-    const sp = app.currentSpace() orelse { app.mode = .normal; app.requestRefresh(); return false; };
-    const pj = app.currentProject() orelse { app.mode = .normal; app.requestRefresh(); return false; };
+    const task = app.currentTask() orelse {
+        app.mode = .normal;
+        app.requestRefresh();
+        return false;
+    };
+    const sp = app.currentSpace() orelse {
+        app.mode = .normal;
+        app.requestRefresh();
+        return false;
+    };
+    const pj = app.currentProject() orelse {
+        app.mode = .normal;
+        app.requestRefresh();
+        return false;
+    };
 
     // ] = next status, [ = prev status
-    if (key.matches(']', .{})) { applyStatusChange(app, sp, pj, task, task.status.next()); return false; }
-    if (key.matches('[', .{})) { applyStatusChange(app, sp, pj, task, task.status.prev()); return false; }
+    if (key.matches(']', .{})) {
+        applyStatusChange(app, sp, pj, task, task.status.next());
+        return false;
+    }
+    if (key.matches('[', .{})) {
+        applyStatusChange(app, sp, pj, task, task.status.prev());
+        return false;
+    }
     // } = next priority (lower), { = prev priority (higher) — shift+]/[
-    if (key.matches('}', .{})) { applyPriorityChange(app, sp, pj, task, task.priority.next()); return false; }
-    if (key.matches('{', .{})) { applyPriorityChange(app, sp, pj, task, task.priority.prev()); return false; }
+    if (key.matches('}', .{})) {
+        applyPriorityChange(app, sp, pj, task, task.priority.next());
+        return false;
+    }
+    if (key.matches('{', .{})) {
+        applyPriorityChange(app, sp, pj, task, task.priority.prev());
+        return false;
+    }
     // X = force task done
     if (key.matches('X', .{ .shift = true })) {
         applyStatusChange(app, sp, pj, task, .done);
@@ -1255,8 +1214,7 @@ fn handleTaskDetailKey(app: *App, key: vaxis.Key) bool {
             new_subs[j] = .{ .title = st.title, .done = st.done };
             j += 1;
         }
-        task_store.update(app.allocator, app.root_dir, sp, pj, task.id,
-            .{ .subtasks = new_subs }) catch {};
+        task_store.update(app.allocator, app.root_dir, sp, pj, task.id, .{ .subtasks = new_subs }) catch {};
         app.reloadTasks();
         if (app.detail_subtask_idx > 0 and
             (app.currentTask() == null or app.detail_subtask_idx >= (app.currentTask() orelse task).subtasks.len))
@@ -1269,11 +1227,20 @@ fn handleTaskDetailKey(app: *App, key: vaxis.Key) bool {
 fn handleOnboardingKey(app: *App, key: vaxis.Key) bool {
     switch (app.ob_step) {
         0 => { // welcome
-            if (key.matches(vaxis.Key.escape, .{})) { app.mode = .normal; return false; }
-            if (key.matches(vaxis.Key.enter, .{}))  { app.ob_step = 1; return false; }
+            if (key.matches(vaxis.Key.escape, .{})) {
+                app.mode = .normal;
+                return false;
+            }
+            if (key.matches(vaxis.Key.enter, .{})) {
+                app.ob_step = 1;
+                return false;
+            }
         },
         1 => { // enter space name
-            if (key.matches(vaxis.Key.escape, .{})) { app.mode = .normal; return false; }
+            if (key.matches(vaxis.Key.escape, .{})) {
+                app.mode = .normal;
+                return false;
+            }
             if (key.matches(vaxis.Key.backspace, .{})) {
                 if (app.ob_space_len > 0) app.ob_space_len -= 1;
                 return false;
@@ -1284,7 +1251,10 @@ fn handleOnboardingKey(app: *App, key: vaxis.Key) bool {
                     space_store.add(app.root_dir, name) catch {};
                     app.reloadSpaces();
                     for (app.spaces, 0..) |s, i| {
-                        if (std.mem.eql(u8, s, name)) { app.space_idx = i; break; }
+                        if (std.mem.eql(u8, s, name)) {
+                            app.space_idx = i;
+                            break;
+                        }
                     }
                     app.ob_step = 2;
                 }
@@ -1298,19 +1268,25 @@ fn handleOnboardingKey(app: *App, key: vaxis.Key) bool {
             }
         },
         2 => { // enter project name
-            if (key.matches(vaxis.Key.escape, .{})) { app.mode = .normal; return false; }
+            if (key.matches(vaxis.Key.escape, .{})) {
+                app.mode = .normal;
+                return false;
+            }
             if (key.matches(vaxis.Key.backspace, .{})) {
                 if (app.ob_proj_len > 0) app.ob_proj_len -= 1;
                 return false;
             }
             if (key.matches(vaxis.Key.enter, .{})) {
                 if (app.ob_proj_len > 0) {
-                    const sp   = app.ob_space_buf[0..app.ob_space_len];
+                    const sp = app.ob_space_buf[0..app.ob_space_len];
                     const name = app.ob_proj_buf[0..app.ob_proj_len];
                     project_store.add(app.allocator, app.root_dir, sp, name) catch {};
                     app.reloadProjects();
                     for (app.projects, 0..) |p, i| {
-                        if (std.mem.eql(u8, p, name)) { app.project_idx = i; break; }
+                        if (std.mem.eql(u8, p, name)) {
+                            app.project_idx = i;
+                            break;
+                        }
                     }
                     app.ob_step = 3;
                 }
@@ -1336,8 +1312,8 @@ fn handleOnboardingKey(app: *App, key: vaxis.Key) bool {
 
 pub fn render(app: *const App, win: vaxis.Window) void {
     win.fill(.{}); // NOT clear(): clear() sets Cell{.default=true} which vaxis skips even
-                   // on full refresh — old overlay backgrounds stay visible. fill(.{})
-                   // writes explicit blanks (default=false) that vaxis actually emits.
+    // on full refresh — old overlay backgrounds stay visible. fill(.{})
+    // writes explicit blanks (default=false) that vaxis actually emits.
 
     if (win.width < 50 or win.height < 8) {
         _ = win.print(&[_]vaxis.Segment{
@@ -1347,52 +1323,50 @@ pub fn render(app: *const App, win: vaxis.Window) void {
     }
 
     const panel_h: u16 = win.height -| 4;
-    const spaces_w: u16  = if (app.compact_mode) (if (app.active == .spaces)   win.width else 0) else @max(16, win.width * 18 / 100);
+    const spaces_w: u16 = if (app.compact_mode) (if (app.active == .spaces) win.width else 0) else @max(16, win.width * 18 / 100);
     const projects_w: u16 = if (app.compact_mode) (if (app.active == .projects) win.width else 0) else @max(18, win.width * 23 / 100);
-    const tasks_w: u16    = if (app.compact_mode) (if (app.active == .tasks)    win.width else 0) else win.width -| spaces_w -| projects_w;
+    const tasks_w: u16 = if (app.compact_mode) (if (app.active == .tasks) win.width else 0) else win.width -| spaces_w -| projects_w;
 
     // compute accent colors
     const space_accent = col_active_border;
     const proj_accent: vaxis.Color = if (app.spaces.len > 0 and app.space_idx < app.space_colors.len and app.space_colors[app.space_idx] != .default)
         itemColorToVaxis(app.space_colors[app.space_idx])
-    else col_active_border;
+    else
+        col_active_border;
     const tasks_accent: vaxis.Color = if (app.projects.len > 0 and app.project_idx < app.project_colors.len and app.project_colors[app.project_idx] != .default)
         itemColorToVaxis(app.project_colors[app.project_idx])
     else if (app.spaces.len > 0 and app.space_idx < app.space_colors.len and app.space_colors[app.space_idx] != .default)
         itemColorToVaxis(app.space_colors[app.space_idx])
-    else col_active_border;
+    else
+        col_active_border;
 
     // panels (always rendered — overlay draws on top afterwards)
     if (!app.compact_mode or app.active == .spaces) {
-        const spaces_inner = renderPanel(win, 0, 0, spaces_w, panel_h,
-            " Spaces ", app.active == .spaces, space_accent);
+        const spaces_inner = renderPanel(win, 0, 0, spaces_w, panel_h, " Spaces ", app.active == .spaces, space_accent);
         renderStringList(spaces_inner, app.spaces, app.space_colors, app.space_idx, app.active == .spaces);
     }
 
     if (!app.compact_mode or app.active == .projects) {
         const proj_x: i17 = if (app.compact_mode) 0 else @intCast(spaces_w);
-        const projects_inner = renderPanel(win, proj_x, 0, projects_w, panel_h,
-            " Projects ", app.active == .projects, proj_accent);
+        const projects_inner = renderPanel(win, proj_x, 0, projects_w, panel_h, " Projects ", app.active == .projects, proj_accent);
         if (app.compact_mode and app.spaces.len > 0 and app.space_idx < app.spaces.len) {
             _ = win.print(&[_]vaxis.Segment{
-                .{ .text = "- ",                          .style = .{ .fg = proj_accent, .bold = true } },
-                .{ .text = app.spaces[app.space_idx],     .style = .{ .fg = proj_accent, .bold = true } },
-                .{ .text = " ",                           .style = .{ .fg = proj_accent, .bold = true } },
+                .{ .text = "- ", .style = .{ .fg = proj_accent, .bold = true } },
+                .{ .text = app.spaces[app.space_idx], .style = .{ .fg = proj_accent, .bold = true } },
+                .{ .text = " ", .style = .{ .fg = proj_accent, .bold = true } },
             }, .{ .row_offset = 0, .col_offset = @intCast(proj_x + 2 + @as(i17, " Projects ".len)), .wrap = .none });
         }
-        renderProjectList(projects_inner, app.projects, app.project_progress, app.project_colors, app.project_idx,
-            app.active == .projects, app.show_progress);
+        renderProjectList(projects_inner, app.projects, app.project_progress, app.project_colors, app.project_idx, app.active == .projects, app.show_progress);
     }
 
     if (!app.compact_mode or app.active == .tasks) {
         const tasks_x: i17 = if (app.compact_mode) 0 else @intCast(spaces_w + projects_w);
-        const tasks_inner = renderPanel(win, tasks_x, 0, tasks_w, panel_h,
-            " Tasks ", app.active == .tasks, tasks_accent);
+        const tasks_inner = renderPanel(win, tasks_x, 0, tasks_w, panel_h, " Tasks ", app.active == .tasks, tasks_accent);
         if (app.compact_mode and app.projects.len > 0 and app.project_idx < app.projects.len) {
             _ = win.print(&[_]vaxis.Segment{
-                .{ .text = "- ",                              .style = .{ .fg = tasks_accent, .bold = true } },
-                .{ .text = app.projects[app.project_idx],    .style = .{ .fg = tasks_accent, .bold = true } },
-                .{ .text = " ",                              .style = .{ .fg = tasks_accent, .bold = true } },
+                .{ .text = "- ", .style = .{ .fg = tasks_accent, .bold = true } },
+                .{ .text = app.projects[app.project_idx], .style = .{ .fg = tasks_accent, .bold = true } },
+                .{ .text = " ", .style = .{ .fg = tasks_accent, .bold = true } },
             }, .{ .row_offset = 0, .col_offset = @intCast(tasks_x + 2 + @as(i17, " Tasks ".len)), .wrap = .none });
         }
         renderTasks(tasks_inner, app.tasks, app.task_idx, app.active == .tasks, app.alt_priority, app.task_color_grading);
@@ -1403,11 +1377,11 @@ pub fn render(app: *const App, win: vaxis.Window) void {
     // overlays — drawn last so they sit on top
     switch (app.mode) {
         .settings, .settings_confirm => renderSettingsOverlay(win, app),
-        .auth_overlay                => renderAuthOverlay(win, app),
-        .onboarding                  => renderOnboardingOverlay(win, app),
-        .task_detail                 => renderTaskDetailOverlay(win, app),
-        .task_confirm_delete         => renderConfirmDeleteDialog(win, app),
-        .color_picker                => renderColorPickerOverlay(win, app),
+        .ext_overlay => renderExtOverlay(win, app),
+        .onboarding => renderOnboardingOverlay(win, app),
+        .task_detail => renderTaskDetailOverlay(win, app),
+        .task_confirm_delete => renderConfirmDeleteDialog(win, app),
+        .color_picker => renderColorPickerOverlay(win, app),
         .input => switch (app.input_target) {
             .subtask, .description, .task_title => renderTaskDetailOverlay(win, app),
             else => {},
@@ -1422,7 +1396,7 @@ pub fn render(app: *const App, win: vaxis.Window) void {
         var col: u16 = 0;
         while (col < win.width) : (col += 1) {
             win.writeCell(col, ny, .{
-                .char  = .{ .grapheme = " ", .width = 1 },
+                .char = .{ .grapheme = " ", .width = 1 },
                 .style = .{ .fg = col_selected_fg, .bg = vaxis.Color{ .rgb = [3]u8{ 20, 60, 20 } } },
             });
         }
@@ -1439,7 +1413,10 @@ fn renderPanel(win: vaxis.Window, x: i17, y: i17, w: u16, h: u16, title: []const
     const border_fg = if (active) accent else col_inactive_border;
     const bs = vaxis.Style{ .fg = border_fg };
     const inner = win.child(.{
-        .x_off = x, .y_off = y, .width = w, .height = h,
+        .x_off = x,
+        .y_off = y,
+        .width = w,
+        .height = h,
         .border = .{ .where = .all, .style = bs, .glyphs = .single_rounded },
     });
     _ = win.print(&[_]vaxis.Segment{
@@ -1456,15 +1433,15 @@ fn renderStringList(win: vaxis.Window, items: []const []const u8, colors: []cons
         return;
     }
     const visible: usize = win.height;
-    const scroll: usize  = if (sel >= visible) sel - visible + 1 else 0;
+    const scroll: usize = if (sel >= visible) sel - visible + 1 else 0;
     for (items[scroll..], 0..) |item, vi| {
         if (vi >= visible) break;
-        const idx    = scroll + vi;
+        const idx = scroll + vi;
         const is_sel = idx == sel;
         const item_color = if (idx < colors.len) colors[idx] else model.ItemColor.default;
         const base_fg = if (item_color != .default) itemColorToVaxis(item_color) else col_normal_fg;
         const fg = base_fg;
-        const bg     = if (is_sel and active) col_selected_bg else vaxis.Color.default;
+        const bg = if (is_sel and active) col_selected_bg else vaxis.Color.default;
         _ = win.print(&[_]vaxis.Segment{
             .{ .text = if (is_sel) " > " else "   ", .style = .{ .fg = fg, .bg = bg } },
             .{ .text = item, .style = .{ .fg = fg, .bg = bg, .bold = is_sel and active } },
@@ -1480,21 +1457,21 @@ fn renderProjectList(win: vaxis.Window, items: []const []const u8, progress: []c
         return;
     }
     const visible: usize = win.height;
-    const scroll: usize  = if (sel >= visible) sel - visible + 1 else 0;
+    const scroll: usize = if (sel >= visible) sel - visible + 1 else 0;
     for (items[scroll..], 0..) |item, vi| {
         if (vi >= visible) break;
-        const idx    = scroll + vi;
+        const idx = scroll + vi;
         const is_sel = idx == sel;
         const item_color = if (idx < project_colors.len) project_colors[idx] else model.ItemColor.default;
         const base_fg = if (item_color != .default) itemColorToVaxis(item_color) else col_normal_fg;
         const fg = base_fg;
-        const bg     = if (is_sel and active) col_selected_bg else vaxis.Color.default;
+        const bg = if (is_sel and active) col_selected_bg else vaxis.Color.default;
         if (show_progress and idx < progress.len) {
             const pct = @min(progress[idx], 100);
             const pct_str = pct_strs[pct];
             _ = win.print(&[_]vaxis.Segment{
                 .{ .text = if (is_sel) " > " else "   ", .style = .{ .fg = fg, .bg = bg } },
-                .{ .text = item,    .style = .{ .fg = fg, .bg = bg, .bold = is_sel and active } },
+                .{ .text = item, .style = .{ .fg = fg, .bg = bg, .bold = is_sel and active } },
                 .{ .text = pct_str, .style = .{ .fg = if (pct == 100) col_low else col_hint_text, .bg = bg } },
             }, .{ .row_offset = @intCast(vi), .col_offset = 0, .wrap = .none });
         } else {
@@ -1514,26 +1491,40 @@ fn renderTasks(win: vaxis.Window, tasks: []const model.Task, sel: usize, active:
         return;
     }
     const visible: usize = win.height;
-    const scroll: usize  = if (sel >= visible) sel - visible + 1 else 0;
+    const scroll: usize = if (sel >= visible) sel - visible + 1 else 0;
     for (tasks[scroll..], 0..) |task, vi| {
         if (vi >= visible) break;
-        const idx    = scroll + vi;
+        const idx = scroll + vi;
         const is_sel = idx == sel;
-        const bg     = if (is_sel and active) col_selected_bg else vaxis.Color.default;
+        const bg = if (is_sel and active) col_selected_bg else vaxis.Color.default;
         const icon: []const u8 = switch (task.status) {
-            .todo => "[ ]", .in_progress => "[~]", .in_review => "[?]", .done => "[x]",
+            .todo => "[ ]",
+            .in_progress => "[~]",
+            .in_review => "[?]",
+            .done => "[x]",
         };
         const st_fg: vaxis.Color = switch (task.status) {
-            .todo => col_todo_fg, .in_progress => col_in_progress_fg,
-            .in_review => col_in_review_fg, .done => col_done_fg,
+            .todo => col_todo_fg,
+            .in_progress => col_in_progress_fg,
+            .in_review => col_in_review_fg,
+            .done => col_done_fg,
         };
         const pr_fg: vaxis.Color = switch (task.priority) {
-            .low => col_low, .medium => col_medium, .high => col_high, .urgent => col_urgent,
+            .low => col_low,
+            .medium => col_medium,
+            .high => col_high,
+            .urgent => col_urgent,
         };
         const pr_badge: []const u8 = if (alt_priority) switch (task.priority) {
-            .low => " ^  ", .medium => " ^^ ", .high => " ^^^", .urgent => " !!!",
+            .low => " ^  ",
+            .medium => " ^^ ",
+            .high => " ^^^",
+            .urgent => " !!!",
         } else switch (task.priority) {
-            .low => " [L]", .medium => " [M]", .high => " [H]", .urgent => " [U]",
+            .low => " [L]",
+            .medium => " [M]",
+            .high => " [H]",
+            .urgent => " [U]",
         };
         const title_fg: vaxis.Color = if (task.status == .done)
             col_done_fg
@@ -1543,9 +1534,9 @@ fn renderTasks(win: vaxis.Window, tasks: []const model.Task, sel: usize, active:
             col_normal_fg;
         _ = win.print(&[_]vaxis.Segment{
             .{ .text = if (is_sel) " > " else "   ", .style = .{ .fg = st_fg, .bg = bg } },
-            .{ .text = icon,       .style = .{ .fg = st_fg, .bg = bg } },
-            .{ .text = pr_badge,   .style = .{ .fg = pr_fg, .bg = bg } },
-            .{ .text = " ",        .style = .{ .bg = bg } },
+            .{ .text = icon, .style = .{ .fg = st_fg, .bg = bg } },
+            .{ .text = pr_badge, .style = .{ .fg = pr_fg, .bg = bg } },
+            .{ .text = " ", .style = .{ .bg = bg } },
             .{ .text = task.title, .style = .{ .fg = title_fg, .bg = bg, .strikethrough = task.status == .done } },
         }, .{ .row_offset = @intCast(vi), .col_offset = 0, .wrap = .none });
     }
@@ -1556,55 +1547,57 @@ fn renderBottom(win: vaxis.Window, app: *const App, panel_h: u16) void {
     var i: u16 = 0;
     while (i < win.width) : (i += 1) {
         win.writeCell(i, panel_h, .{
-            .char  = .{ .grapheme = "─", .width = 1 },
+            .char = .{ .grapheme = "─", .width = 1 },
             .style = .{ .fg = col_inactive_border },
         });
     }
     // hints
     _ = win.print(&[_]vaxis.Segment{
-        .{ .text = " tab",   .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " tab", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " panel  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "↑↓/jk",   .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " nav  ",   .style = .{ .fg = col_hint_text } },
-        .{ .text = "a",        .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " add  ",   .style = .{ .fg = col_hint_text } },
-        .{ .text = "d",        .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " delete  ",.style = .{ .fg = col_hint_text } },
-        .{ .text = "enter",    .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " open  ",  .style = .{ .fg = col_hint_text } },
-        .{ .text = "[/]",      .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " status  ",.style = .{ .fg = col_hint_text } },
-        .{ .text = "{/}",      .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " priority  ",.style = .{ .fg = col_hint_text } },
-        .{ .text = "s",        .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " settings  ",.style = .{ .fg = col_hint_text } },
-        .{ .text = "q",        .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " quit",    .style = .{ .fg = col_hint_text } },
+        .{ .text = "↑↓/jk", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " nav  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "a", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " add  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "d", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " delete  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " open  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "[/]", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " status  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "{/}", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " priority  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "i/I", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " import/export  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "s", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " settings  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "q", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " quit", .style = .{ .fg = col_hint_text } },
     }, .{ .row_offset = panel_h + 1, .col_offset = 0, .wrap = .none });
     // context / input
     const ctx_y = panel_h + 2;
     if (app.mode == .input) {
         const prompt: []const u8 = switch (app.input_target) {
-            .space       => " New space name: ",
-            .project     => " New project name: ",
-            .task        => " New task title: ",
-            .subtask     => " New subtask: ",
+            .space => " New space name: ",
+            .project => " New project name: ",
+            .task => " New task title: ",
+            .subtask => " New subtask: ",
             .description => " Description: ",
-            .task_title  => " Rename task: ",
+            .task_title => " Rename task: ",
         };
         _ = win.print(&[_]vaxis.Segment{
-            .{ .text = prompt,           .style = .{ .fg = col_input_prompt, .bold = true } },
+            .{ .text = prompt, .style = .{ .fg = col_input_prompt, .bold = true } },
             .{ .text = app.inputSlice(), .style = .{ .fg = col_normal_fg } },
-            .{ .text = "|",              .style = .{ .fg = col_input_prompt } },
+            .{ .text = "|", .style = .{ .fg = col_input_prompt } },
         }, .{ .row_offset = ctx_y, .col_offset = 0, .wrap = .none });
     } else {
         if (app.currentSpace()) |sp| {
             if (app.currentProject()) |pj| {
                 _ = win.print(&[_]vaxis.Segment{
-                    .{ .text = " ",  .style = .{ .fg = col_hint_text } },
-                    .{ .text = sp,   .style = .{ .fg = col_hint_text } },
+                    .{ .text = " ", .style = .{ .fg = col_hint_text } },
+                    .{ .text = sp, .style = .{ .fg = col_hint_text } },
                     .{ .text = " / ", .style = .{ .fg = col_hint_text } },
-                    .{ .text = pj,   .style = .{ .fg = col_hint_text } },
+                    .{ .text = pj, .style = .{ .fg = col_hint_text } },
                 }, .{ .row_offset = ctx_y, .col_offset = 0, .wrap = .none });
             }
         }
@@ -1615,7 +1608,7 @@ fn renderBottom(win: vaxis.Window, app: *const App, panel_h: u16) void {
 
 /// Fills an area with the overlay background, draws a border, returns the inner window.
 fn makeOverlay(win: vaxis.Window, ow: u16, oh: u16) vaxis.Window {
-    const x: u16 = (win.width  -| ow) / 2;
+    const x: u16 = (win.width -| ow) / 2;
     const y: u16 = (win.height -| oh) / 2;
     // flood-fill the footprint so panel content doesn't show through
     var row: u16 = 0;
@@ -1623,17 +1616,17 @@ fn makeOverlay(win: vaxis.Window, ow: u16, oh: u16) vaxis.Window {
         var col: u16 = 0;
         while (col < ow) : (col += 1) {
             win.writeCell(x + col, y + row, .{
-                .char  = .{ .grapheme = " ", .width = 1 },
+                .char = .{ .grapheme = " ", .width = 1 },
                 .style = .{ .bg = col_overlay_bg },
             });
         }
     }
     return win.child(.{
-        .x_off = @intCast(x), .y_off = @intCast(y),
-        .width = ow, .height = oh,
-        .border = .{ .where = .all,
-                     .style  = .{ .fg = col_active_border, .bg = col_overlay_bg },
-                     .glyphs = .single_rounded },
+        .x_off = @intCast(x),
+        .y_off = @intCast(y),
+        .width = ow,
+        .height = oh,
+        .border = .{ .where = .all, .style = .{ .fg = col_active_border, .bg = col_overlay_bg }, .glyphs = .single_rounded },
     });
 }
 
@@ -1683,187 +1676,165 @@ fn lastVisibleLine(text: []const u8, max_rows: u16) []const u8 {
     return line;
 }
 
-// ── Auth overlay ──────────────────────────────────────────────────────────────
+// ── Extension overlay ─────────────────────────────────────────────────────────
 
-fn renderAuthOverlay(win: vaxis.Window, app: *const App) void {
+fn renderExtOverlay(win: vaxis.Window, app: *const App) void {
+    const manifest = app.ext_manifest orelse return;
+    const ext_name = if (app.extensions.len > 0) app.extensions[app.ext_idx].name else manifest.name;
+
     const ow: u16 = 64;
-    const service_name: []const u8 = switch (app.auth_service) {
-        .linear => " Connect to Linear ",
-        .github => " Connect to GitHub ",
-        else    => " Connect ",
-    };
+    const cfg_rows: u16 = @intCast(@max(manifest.config_keys.len, 1) * 2);
+    const oh: u16 = 11 + cfg_rows;
+    const inner = makeOverlay(win, ow, oh);
 
-    switch (app.auth_mode) {
-        .choose => renderAuthChoose(win, app, ow, service_name),
-        .device_waiting => renderAuthDeviceWaiting(win, app, ow, service_name),
-        .token_input => renderAuthTokenInput(win, app, ow, service_name),
+    _ = inner.print(&[_]vaxis.Segment{
+        .{ .text = " Extension: ", .style = .{ .fg = col_active_border, .bold = true } },
+        .{ .text = ext_name, .style = .{ .fg = col_selected_fg, .bold = true } },
+    }, .{ .row_offset = 0, .col_offset = 1, .wrap = .none });
+
+    if (manifest.description.len > 0) {
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = manifest.description, .style = .{ .fg = col_hint_text } },
+        }, .{ .row_offset = 2, .col_offset = 2, .wrap = .none });
     }
-}
 
-fn renderAuthChoose(win: vaxis.Window, app: *const App, ow: u16, title: []const u8) void {
-    const oh: u16 = 13;
-    const inner = makeOverlay(win, ow, oh);
-    overlayTitle(inner, title);
-
+    // Capabilities summary
     _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = "How would you like to authenticate?", .style = .{ .fg = col_hint_text } },
-    }, .{ .row_offset = 2, .col_offset = 2, .wrap = .none });
+        .{ .text = "capabilities: ", .style = .{ .fg = col_dim_fg } },
+        .{ .text = if (manifest.can_import) "import " else "", .style = .{ .fg = col_low } },
+        .{ .text = if (manifest.can_export) "export " else "", .style = .{ .fg = col_low } },
+        .{ .text = if (manifest.can_setup) "setup" else "", .style = .{ .fg = col_low } },
+    }, .{ .row_offset = 3, .col_offset = 2, .wrap = .none });
 
-    // Option 0 — device flow (GitHub only) or browser PAT (Linear)
-    const opt0_label: []const u8 = switch (app.auth_service) {
-        .github => "Login with GitHub  (opens browser, no copy-paste needed)",
-        .linear => "Open Linear API keys in browser",
-        else    => "Open in browser",
-    };
-    const opt0_sel = app.auth_choose_idx == 0;
-    const opt1_sel = app.auth_choose_idx == 1;
+    // Config entries
+    var row: u16 = 5;
+    if (manifest.config_keys.len == 0) {
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = "  (this extension has no config keys)", .style = .{ .fg = col_dim_fg, .italic = true } },
+        }, .{ .row_offset = row, .col_offset = 0, .wrap = .none });
+        row += 2;
+    }
+    for (manifest.config_keys, 0..) |ck, i| {
+        const is_sel = i == app.ext_cfg_idx;
+        const is_editing = is_sel and app.ext_editing;
+        const fg = if (is_sel) col_selected_fg else col_normal_fg;
+        const bg = if (is_sel) col_selected_bg else vaxis.Color.default;
 
+        // Value: editing shows the live input; secrets are masked otherwise
+        var mask_buf: [24]u8 = undefined;
+        const stored: []const u8 = if (i < app.ext_cfg_values.len) app.ext_cfg_values[i] else "";
+        const value: []const u8 = blk: {
+            if (is_editing) break :blk app.ext_input_buf[0..app.ext_input_len];
+            if (stored.len == 0) break :blk "(not set)";
+            if (ck.secret) {
+                const tail = @min(4, stored.len);
+                const stars = @min(@as(usize, 8), mask_buf.len -| tail);
+                @memset(mask_buf[0..stars], '*');
+                std.mem.copyForwards(u8, mask_buf[stars .. stars + tail], stored[stored.len - tail ..]);
+                break :blk mask_buf[0 .. stars + tail];
+            }
+            break :blk stored;
+        };
+
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = if (is_sel) " >  " else "    ", .style = .{ .fg = fg, .bg = bg } },
+            .{ .text = ck.label, .style = .{ .fg = fg, .bg = bg, .bold = is_sel } },
+            .{ .text = ":  ", .style = .{ .fg = fg, .bg = bg } },
+            .{ .text = value, .style = .{ .fg = if (stored.len > 0 or is_editing) col_normal_fg else col_dim_fg, .bg = bg, .italic = stored.len == 0 and !is_editing } },
+            .{ .text = if (is_editing) "|" else "", .style = .{ .fg = col_input_prompt, .bg = bg } },
+        }, .{ .row_offset = row, .col_offset = 0, .wrap = .none });
+        row += 2;
+    }
+
+    // CLI hints for linking / setup
     _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = if (opt0_sel) " >  " else "    ", .style = .{ .fg = if (opt0_sel) col_selected_fg else col_dim_fg, .bg = if (opt0_sel) col_selected_bg else vaxis.Color.default } },
-        .{ .text = opt0_label, .style = .{ .fg = if (opt0_sel) col_selected_fg else col_normal_fg, .bg = if (opt0_sel) col_selected_bg else vaxis.Color.default, .bold = opt0_sel } },
-    }, .{ .row_offset = 4, .col_offset = 0, .wrap = .none });
+        .{ .text = "link a project:  todo ext link <space> <project> ", .style = .{ .fg = col_dim_fg } },
+        .{ .text = ext_name, .style = .{ .fg = col_dim_fg } },
+    }, .{ .row_offset = row + 1, .col_offset = 2, .wrap = .none });
+    if (manifest.can_setup) {
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = "browser login:   todo ext setup ", .style = .{ .fg = col_dim_fg } },
+            .{ .text = ext_name, .style = .{ .fg = col_dim_fg } },
+        }, .{ .row_offset = row + 2, .col_offset = 2, .wrap = .none });
+    }
 
-    _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = if (opt1_sel) " >  " else "    ", .style = .{ .fg = if (opt1_sel) col_selected_fg else col_dim_fg, .bg = if (opt1_sel) col_selected_bg else vaxis.Color.default } },
-        .{ .text = "Paste an API key / personal access token", .style = .{ .fg = if (opt1_sel) col_selected_fg else col_normal_fg, .bg = if (opt1_sel) col_selected_bg else vaxis.Color.default, .bold = opt1_sel } },
-    }, .{ .row_offset = 6, .col_offset = 0, .wrap = .none });
-
-    overlayHints(inner, oh -| 3, &[_]vaxis.Segment{
-        .{ .text = "↑↓/jk",  .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " nav  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "enter",  .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " select  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "esc",    .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " back",  .style = .{ .fg = col_hint_text } },
-    });
-}
-
-fn renderAuthDeviceWaiting(win: vaxis.Window, app: *const App, ow: u16, title: []const u8) void {
-    const oh: u16 = 14;
-    const inner = makeOverlay(win, ow, oh);
-    overlayTitle(inner, title);
-
-    const user_code = app.oauth_user_code_buf[0..app.oauth_user_code_len];
-    const uri       = app.oauth_uri_buf[0..app.oauth_uri_len];
-    const show_uri  = if (uri.len > 0) uri else "github.com/login/device";
-
-    _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = "1.  Your browser has been opened to:", .style = .{ .fg = col_hint_text } },
-    }, .{ .row_offset = 2, .col_offset = 2, .wrap = .none });
-
-    _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = show_uri, .style = .{ .fg = col_active_border, .bold = true } },
-    }, .{ .row_offset = 3, .col_offset = 6, .wrap = .none });
-
-    _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = "2.  Enter this one-time code:", .style = .{ .fg = col_hint_text } },
-    }, .{ .row_offset = 5, .col_offset = 2, .wrap = .none });
-
-    _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = if (user_code.len > 0) user_code else "fetching…",
-           .style = .{ .fg = col_selected_fg, .bold = true } },
-    }, .{ .row_offset = 6, .col_offset = 6, .wrap = .none });
-
-    _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = "Waiting for you to authorise in the browser…", .style = .{ .fg = col_dim_fg, .italic = true } },
-    }, .{ .row_offset = 8, .col_offset = 2, .wrap = .none });
-
-    overlayHints(inner, oh -| 3, &[_]vaxis.Segment{
-        .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " cancel", .style = .{ .fg = col_hint_text } },
-    });
-}
-
-fn renderAuthTokenInput(win: vaxis.Window, app: *const App, ow: u16, title: []const u8) void {
-    const oh: u16 = 14;
-    const inner = makeOverlay(win, ow, oh);
-    overlayTitle(inner, title);
-
-    const instr: []const u8 = switch (app.auth_service) {
-        .linear => "Your browser has opened linear.app/settings/api\nCreate a new token, copy it, then paste it below:",
-        .github => "Create a token at github.com/settings/tokens/new\n(scopes: repo, read:user), then paste it below:",
-        else    => "Paste your API token:",
-    };
-    _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = instr, .style = .{ .fg = col_hint_text } },
-    }, .{ .row_offset = 2, .col_offset = 2, .wrap = .word });
-
-    // Input field background
-    var c: u16 = 2;
-    while (c < ow -| 3) : (c += 1) {
-        inner.writeCell(c, 6, .{
-            .char  = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = col_selected_bg },
+    if (app.ext_editing) {
+        overlayHints(inner, oh -| 2, &[_]vaxis.Segment{
+            .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
+            .{ .text = " save  ", .style = .{ .fg = col_hint_text } },
+            .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
+            .{ .text = " cancel", .style = .{ .fg = col_hint_text } },
+        });
+    } else {
+        overlayHints(inner, oh -| 2, &[_]vaxis.Segment{
+            .{ .text = "↑↓/jk", .style = .{ .fg = col_hint_key, .bold = true } },
+            .{ .text = " nav  ", .style = .{ .fg = col_hint_text } },
+            .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
+            .{ .text = " edit  ", .style = .{ .fg = col_hint_text } },
+            .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
+            .{ .text = " close", .style = .{ .fg = col_hint_text } },
         });
     }
-
-    // Show token masked (only last 8 visible once longer than field)
-    const field_w: usize = ow -| 6;
-    const token = app.auth_buf[0..app.auth_len];
-    var display_buf: [128]u8 = undefined;
-    const display: []const u8 = blk: {
-        if (token.len == 0) break :blk "";
-        if (token.len <= field_w) break :blk token;
-        const tail = @min(8, token.len);
-        const stars = @min(field_w -| tail, display_buf.len -| tail);
-        @memset(display_buf[0..stars], '*');
-        @memcpy(display_buf[stars .. stars + tail], token[token.len - tail ..]);
-        break :blk display_buf[0 .. stars + tail];
-    };
-
-    _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = display, .style = .{ .fg = col_normal_fg, .bg = col_selected_bg } },
-        .{ .text = "█",     .style = .{ .fg = col_input_prompt, .bg = col_selected_bg } },
-    }, .{ .row_offset = 6, .col_offset = 2, .wrap = .none });
-
-    const hint_text: []const u8 = if (app.auth_len > 0) "Token ready" else "Waiting for token…";
-    _ = inner.print(&[_]vaxis.Segment{
-        .{ .text = hint_text, .style = .{ .fg = col_dim_fg, .italic = true } },
-    }, .{ .row_offset = 8, .col_offset = 2, .wrap = .none });
-
-    overlayHints(inner, oh -| 3, &[_]vaxis.Segment{
-        .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " connect  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "esc",   .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " back", .style = .{ .fg = col_hint_text } },
-    });
 }
 
 // ── Settings overlay ──────────────────────────────────────────────────────────
 
 fn renderSettingsOverlay(win: vaxis.Window, app: *const App) void {
-    const ow: u16 = 56;
-    const oh: u16 = 40;
+    const ow: u16 = 60;
+    const oh: u16 = 22;
     const inner = makeOverlay(win, ow, oh);
     overlayTitle(inner, " Settings");
 
-    var row: u16 = 2;
-    for (settings_entries, 0..) |entry, ei| {
+    // ── Tab bar (row 2) ──
+    var tab_col: u16 = 1;
+    for (settings_tab_labels, 0..) |label, ti| {
+        const is_active = ti == app.settings_tab;
+        const fg = if (is_active) col_selected_fg else col_normal_fg;
+        const bg = if (is_active) col_selected_bg else vaxis.Color.default;
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = if (is_active) "[" else " ", .style = .{ .fg = fg, .bg = bg, .bold = is_active } },
+            .{ .text = label, .style = .{ .fg = fg, .bg = bg, .bold = is_active } },
+            .{ .text = if (is_active) "]" else " ", .style = .{ .fg = fg, .bg = bg, .bold = is_active } },
+        }, .{ .row_offset = 2, .col_offset = tab_col, .wrap = .none });
+        tab_col += @as(u16, @intCast(label.len)) + 2;
+        if (ti + 1 < settings_tab_labels.len) {
+            _ = inner.print(&[_]vaxis.Segment{
+                .{ .text = "  ", .style = .{ .fg = col_inactive_border } },
+            }, .{ .row_offset = 2, .col_offset = tab_col, .wrap = .none });
+            tab_col += 2;
+        }
+    }
+
+    // Separator below tab bar (row 3)
+    var sep_col: u16 = 1;
+    while (sep_col < ow -| 2) : (sep_col += 1) {
+        inner.writeCell(sep_col, 3, .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = .{ .fg = col_inactive_border },
+        });
+    }
+
+    // ── Entries for the current tab (starting row 5) ──
+    var row: u16 = 5;
+    if (app.settings_tab == ext_tab_index) {
+        renderExtensionsTab(inner, app, row, oh);
+        if (app.mode == .settings_confirm) renderConfirmDialog(win);
+        return;
+    }
+    const te = tabEntries(app.settings_tab);
+    for (te, 0..) |entry, ei| {
         switch (entry.kind) {
-            .section => {
-                // Section heading
-                _ = inner.print(&[_]vaxis.Segment{
-                    .{ .text = entry.label, .style = .{ .fg = col_section_header, .bold = true } },
-                }, .{ .row_offset = row, .col_offset = 1, .wrap = .none });
-                // Underline the section header
-                var sep_col: u16 = 1;
-                const sep_end: u16 = ow -| 3;
-                while (sep_col < sep_end) : (sep_col += 1) {
-                    inner.writeCell(sep_col, row + 1, .{
-                        .char  = .{ .grapheme = "─", .width = 1 },
-                        .style = .{ .fg = col_inactive_border },
-                    });
-                }
-                row += 2;
-            },
+            .section => {},
             .toggle => {
                 const is_sel = ei == app.settings_idx;
-                const fg     = if (is_sel) col_selected_fg else col_normal_fg;
-                const bg     = if (is_sel) col_selected_bg else vaxis.Color.default;
+                const fg = if (is_sel) col_selected_fg else col_normal_fg;
+                const bg = if (is_sel) col_selected_bg else vaxis.Color.default;
                 const checked: bool = switch (entry.id) {
-                    .show_progress     => app.show_progress,
-                    .alt_priority      => app.alt_priority,
+                    .show_progress => app.show_progress,
+                    .alt_priority => app.alt_priority,
                     .task_color_grading => app.task_color_grading,
+                    .compact_mode => app.compact_mode,
+                    .hide_done => app.hide_done,
                     else => false,
                 };
                 _ = inner.print(&[_]vaxis.Segment{
@@ -1881,13 +1852,13 @@ fn renderSettingsOverlay(win: vaxis.Window, app: *const App) void {
             },
             .action => {
                 const is_sel = ei == app.settings_idx;
-                const fg     = if (is_sel) col_selected_fg else col_normal_fg;
-                const bg     = if (is_sel) col_selected_bg else vaxis.Color.default;
+                const fg = if (is_sel) col_selected_fg else col_normal_fg;
+                const bg = if (is_sel) col_selected_bg else vaxis.Color.default;
                 if (entry.id == .task_sort) {
                     const sort_label: []const u8 = switch (app.task_sort) {
-                        .by_id            => "Sort order: Default",
+                        .by_id => "Sort order: Default",
                         .by_priority_desc => "Sort order: Priority",
-                        .by_status        => "Sort order: Status",
+                        .by_status => "Sort order: Status",
                     };
                     _ = inner.print(&[_]vaxis.Segment{
                         .{ .text = if (is_sel) " >  " else "    ", .style = .{ .fg = fg, .bg = bg } },
@@ -1907,43 +1878,67 @@ fn renderSettingsOverlay(win: vaxis.Window, app: *const App) void {
                 }
                 row += 3;
             },
-            .todo => {
-                const is_sel = ei == app.settings_idx;
-                const fg     = if (is_sel) col_selected_fg else col_dim_fg;
-                const bg     = if (is_sel) col_selected_bg else vaxis.Color.default;
-                _ = inner.print(&[_]vaxis.Segment{
-                    .{ .text = if (is_sel) " >  " else "    ", .style = .{ .fg = fg, .bg = bg } },
-                    .{ .text = entry.label, .style = .{ .fg = fg, .bg = bg } },
-                    .{ .text = "  ", .style = .{ .bg = bg } },
-                    .{ .text = "[TODO]", .style = .{ .fg = col_todo_badge, .bg = bg, .bold = true } },
-                }, .{ .row_offset = row, .col_offset = 0, .wrap = .none });
-                if (entry.sub.len > 0) {
-                    _ = inner.print(&[_]vaxis.Segment{
-                        .{ .text = "    ", .style = .{ .bg = bg } },
-                        .{ .text = entry.sub, .style = .{ .fg = col_dim_fg, .bg = bg, .italic = true } },
-                    }, .{ .row_offset = row + 1, .col_offset = 0, .wrap = .none });
-                }
-                row += 3;
-            },
         }
     }
 
-    const hint_row = oh -| 3;
-    overlayHints(inner, hint_row, &[_]vaxis.Segment{
-        .{ .text = "↑↓/jk",  .style = .{ .fg = col_hint_key, .bold = true } },
+    overlayHints(inner, oh -| 3, &[_]vaxis.Segment{
+        .{ .text = "h/l", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " tabs  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "↑↓/jk", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " nav  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "enter",  .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " select  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "esc",    .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " close", .style = .{ .fg = col_hint_text } },
     });
 
     if (app.mode == .settings_confirm) renderConfirmDialog(win);
 }
 
+/// Renders the dynamic Extensions tab inside the settings overlay:
+/// the discovered extension executables, plus its own hint row.
+fn renderExtensionsTab(inner: vaxis.Window, app: *const App, start_row: u16, oh: u16) void {
+    var row: u16 = start_row;
+
+    if (app.extensions.len == 0) {
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = "    No extensions installed.", .style = .{ .fg = col_dim_fg, .italic = true } },
+        }, .{ .row_offset = row, .col_offset = 0, .wrap = .none });
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = "    Drop executables into ~/.todo/extensions", .style = .{ .fg = col_hint_text } },
+        }, .{ .row_offset = row + 1, .col_offset = 0, .wrap = .none });
+        _ = inner.print(&[_]vaxis.Segment{
+            .{ .text = "    then run:  todo ext list", .style = .{ .fg = col_hint_text } },
+        }, .{ .row_offset = row + 2, .col_offset = 0, .wrap = .none });
+    } else {
+        for (app.extensions, 0..) |ref, i| {
+            const is_sel = i == app.ext_idx;
+            const fg = if (is_sel) col_selected_fg else col_normal_fg;
+            const bg = if (is_sel) col_selected_bg else vaxis.Color.default;
+            _ = inner.print(&[_]vaxis.Segment{
+                .{ .text = if (is_sel) " >  " else "    ", .style = .{ .fg = fg, .bg = bg } },
+                .{ .text = ref.name, .style = .{ .fg = fg, .bg = bg, .bold = is_sel } },
+            }, .{ .row_offset = row, .col_offset = 0, .wrap = .none });
+            row += 2;
+            if (row >= oh -| 5) break;
+        }
+    }
+
+    overlayHints(inner, oh -| 3, &[_]vaxis.Segment{
+        .{ .text = "h/l", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " tabs  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "↑↓/jk", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " nav  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " configure  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " close", .style = .{ .fg = col_hint_text } },
+    });
+}
+
 fn renderConfirmDialog(win: vaxis.Window) void {
     const cw: u16 = 48;
-    const ch: u16 =  7;
+    const ch: u16 = 7;
     const inner = makeOverlay(win, cw, ch);
     overlayTitle(inner, " Hard Reset");
 
@@ -1955,9 +1950,9 @@ fn renderConfirmDialog(win: vaxis.Window) void {
     }, .{ .row_offset = 3, .col_offset = 0, .wrap = .none });
 
     overlayHints(inner, ch -| 2, &[_]vaxis.Segment{
-        .{ .text = "enter",  .style = .{ .fg = col_warning, .bold = true } },
+        .{ .text = "enter", .style = .{ .fg = col_warning, .bold = true } },
         .{ .text = " confirm  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "esc",    .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " cancel", .style = .{ .fg = col_hint_text } },
     });
 }
@@ -1969,14 +1964,14 @@ fn renderConfirmDeleteDialog(win: vaxis.Window, app: *const App) void {
     const ch: u16 = 7;
     const inner = makeOverlay(win, cw, ch);
     const label: []const u8 = switch (app.confirm_delete_panel) {
-        .spaces   => "Delete this space and ALL its contents?",
+        .spaces => "Delete this space and ALL its contents?",
         .projects => "Delete this project and ALL its tasks?",
-        .tasks    => "Delete this task?",
+        .tasks => "Delete this task?",
     };
     overlayTitle(inner, " Confirm Delete");
     _ = inner.print(&[_]vaxis.Segment{
         .{ .text = " ⚠  ", .style = .{ .fg = col_warning } },
-        .{ .text = label,  .style = .{ .fg = col_warning, .bold = true } },
+        .{ .text = label, .style = .{ .fg = col_warning, .bold = true } },
     }, .{ .row_offset = 2, .col_offset = 0, .wrap = .none });
     _ = inner.print(&[_]vaxis.Segment{
         .{ .text = "    This action cannot be undone.", .style = .{ .fg = col_hint_text } },
@@ -1984,7 +1979,7 @@ fn renderConfirmDeleteDialog(win: vaxis.Window, app: *const App) void {
     overlayHints(inner, ch -| 2, &[_]vaxis.Segment{
         .{ .text = "enter", .style = .{ .fg = col_warning, .bold = true } },
         .{ .text = " confirm  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "esc",   .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " cancel", .style = .{ .fg = col_hint_text } },
     });
 }
@@ -2016,51 +2011,56 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
         }, .{ .row_offset = 0, .col_offset = 0, .wrap = .none });
     } else {
         _ = inner.print(&[_]vaxis.Segment{
-            .{ .text = " ",          .style = .{ .fg = col_active_border, .bold = true } },
-            .{ .text = task.title,   .style = .{ .fg = col_active_border, .bold = true } },
+            .{ .text = " ", .style = .{ .fg = col_active_border, .bold = true } },
+            .{ .text = task.title, .style = .{ .fg = col_active_border, .bold = true } },
         }, .{ .row_offset = 0, .col_offset = 1, .wrap = .none });
     }
 
     // Status + Priority row
     const status_icon: []const u8 = switch (task.status) {
-        .todo => "[ ]", .in_progress => "[~]", .in_review => "[?]", .done => "[x]",
+        .todo => "[ ]",
+        .in_progress => "[~]",
+        .in_review => "[?]",
+        .done => "[x]",
     };
     const status_label: []const u8 = switch (task.status) {
-        .todo => "todo", .in_progress => "in-progress", .in_review => "in-review", .done => "done",
+        .todo => "todo",
+        .in_progress => "in-progress",
+        .in_review => "in-review",
+        .done => "done",
     };
     const st_fg: vaxis.Color = switch (task.status) {
-        .todo => col_todo_fg, .in_progress => col_in_progress_fg,
-        .in_review => col_in_review_fg, .done => col_done_fg,
+        .todo => col_todo_fg,
+        .in_progress => col_in_progress_fg,
+        .in_review => col_in_review_fg,
+        .done => col_done_fg,
     };
     const pr_fg: vaxis.Color = switch (task.priority) {
-        .low => col_low, .medium => col_medium, .high => col_high, .urgent => col_urgent,
+        .low => col_low,
+        .medium => col_medium,
+        .high => col_high,
+        .urgent => col_urgent,
     };
     _ = inner.print(&[_]vaxis.Segment{
         .{ .text = "  Status  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = status_icon,  .style = .{ .fg = st_fg } },
+        .{ .text = status_icon, .style = .{ .fg = st_fg } },
         .{ .text = " ", .style = .{} },
         .{ .text = status_label, .style = .{ .fg = st_fg, .bold = true } },
         .{ .text = "    Priority  ", .style = .{ .fg = col_hint_text } },
         .{ .text = task.priority.toString(), .style = .{ .fg = pr_fg, .bold = true } },
     }, .{ .row_offset = 2, .col_offset = 0, .wrap = .none });
 
-    // Integration row (only when task is linked to an external service)
+    // Extension row (only when task is linked to an external item)
     var detail_row: u16 = 4;
     if (has_integration) {
-        const source_label: []const u8 = switch (task.integration_source) {
-            .linear => "linear",
-            .github => "github",
-            .trello => "trello",
-            .none   => "",
-        };
         const synced_label = if (task.synced_at.len > 0) task.synced_at else "never";
         _ = inner.print(&[_]vaxis.Segment{
-            .{ .text = "  Integration  ", .style = .{ .fg = col_hint_text } },
-            .{ .text = source_label,      .style = .{ .fg = col_hint_key,  .bold = true } },
-            .{ .text = "  ",              .style = .{} },
-            .{ .text = task.external_id,  .style = .{ .fg = col_normal_fg } },
-            .{ .text = "  synced ",       .style = .{ .fg = col_dim_fg } },
-            .{ .text = synced_label,      .style = .{ .fg = col_dim_fg } },
+            .{ .text = "  Extension  ", .style = .{ .fg = col_hint_text } },
+            .{ .text = task.source, .style = .{ .fg = col_hint_key, .bold = true } },
+            .{ .text = "  ", .style = .{} },
+            .{ .text = task.external_id, .style = .{ .fg = col_normal_fg } },
+            .{ .text = "  synced ", .style = .{ .fg = col_dim_fg } },
+            .{ .text = synced_label, .style = .{ .fg = col_dim_fg } },
         }, .{ .row_offset = 3, .col_offset = 0, .wrap = .none });
         detail_row = 6; // shift subsequent rows down by 2
     }
@@ -2113,17 +2113,18 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
         const max_show: usize = 6;
         const show = @min(task.subtasks.len, max_show);
         const scroll: usize = if (app.detail_subtask_idx >= max_show)
-            app.detail_subtask_idx - max_show + 1 else 0;
+            app.detail_subtask_idx - max_show + 1
+        else
+            0;
         for (task.subtasks[scroll..][0..@min(show, task.subtasks.len -| scroll)], 0..) |st, vi| {
-            const idx    = scroll + vi;
+            const idx = scroll + vi;
             const is_sel = idx == app.detail_subtask_idx;
-            const bg     = if (is_sel) col_selected_bg else vaxis.Color.default;
-            const fg     = if (is_sel) col_selected_fg else col_normal_fg;
+            const bg = if (is_sel) col_selected_bg else vaxis.Color.default;
+            const fg = if (is_sel) col_selected_fg else col_normal_fg;
             _ = inner.print(&[_]vaxis.Segment{
                 .{ .text = if (is_sel) "  > " else "    ", .style = .{ .fg = fg, .bg = bg } },
                 .{ .text = if (st.done) "[x] " else "[ ] ", .style = .{ .fg = if (st.done) col_low else col_normal_fg, .bg = bg } },
-                .{ .text = st.title, .style = .{ .fg = if (st.done) col_done_fg else fg,
-                    .bg = bg, .strikethrough = st.done } },
+                .{ .text = st.title, .style = .{ .fg = if (st.done) col_done_fg else fg, .bg = bg, .strikethrough = st.done } },
             }, .{ .row_offset = subtask_base_row + @as(u16, @intCast(vi)), .col_offset = 0, .wrap = .none });
         }
         if (is_adding_sub) {
@@ -2139,30 +2140,30 @@ fn renderTaskDetailOverlay(win: vaxis.Window, app: *const App) void {
     // Hints (two rows)
     const hint_row = oh -| 3;
     overlayHints(inner, hint_row, &[_]vaxis.Segment{
-        .{ .text = "[/]",   .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "[/]", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " status  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "{/}",   .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "{/}", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " priority  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "X",     .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "X", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " done  ", .style = .{ .fg = col_hint_text } },
     });
     overlayHints(inner, hint_row + 1, &[_]vaxis.Segment{
-        .{ .text = "r",     .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "r", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " rename  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "e",     .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "e", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " desc  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "a",     .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "a", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " subtask  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "d",     .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "d", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " del sub  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "esc",   .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " close", .style = .{ .fg = col_hint_text } },
     });
 }
 
 // ── Colour picker overlay ─────────────────────────────────────────────────────
 
-const color_picker_names  = [_][]const u8{
+const color_picker_names = [_][]const u8{
     "Default", "Red", "Green", "Blue", "Orange", "Purple", "Cyan", "Yellow",
 };
 const color_picker_values = [_]model.ItemColor{
@@ -2175,9 +2176,9 @@ fn renderColorPickerOverlay(win: vaxis.Window, app: *const App) void {
     const inner = makeOverlay(win, ow, oh);
 
     const title: []const u8 = switch (app.color_picker_panel) {
-        .spaces   => " Space Colour",
+        .spaces => " Space Colour",
         .projects => " Project Colour",
-        .tasks    => " Colour",
+        .tasks => " Colour",
     };
     overlayTitle(inner, title);
 
@@ -2187,18 +2188,17 @@ fn renderColorPickerOverlay(win: vaxis.Window, app: *const App) void {
         const bg = if (is_sel) col_selected_bg else vaxis.Color.default;
         _ = inner.print(&[_]vaxis.Segment{
             .{ .text = if (is_sel) " > " else "   ", .style = .{ .fg = col_selected_fg, .bg = bg } },
-            .{ .text = "* ",   .style = .{ .fg = item_col, .bg = bg } },
-            .{ .text = name,   .style = .{ .fg = if (is_sel) col_selected_fg else col_normal_fg,
-                                           .bg = bg, .bold = is_sel } },
+            .{ .text = "* ", .style = .{ .fg = item_col, .bg = bg } },
+            .{ .text = name, .style = .{ .fg = if (is_sel) col_selected_fg else col_normal_fg, .bg = bg, .bold = is_sel } },
         }, .{ .row_offset = @intCast(2 + i), .col_offset = 0, .wrap = .none });
     }
 
     overlayHints(inner, oh -| 2, &[_]vaxis.Segment{
-        .{ .text = "↑↓/jk",  .style = .{ .fg = col_hint_key, .bold = true } },
-        .{ .text = " nav  ",  .style = .{ .fg = col_hint_text } },
-        .{ .text = "enter",   .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "↑↓/jk", .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = " nav  ", .style = .{ .fg = col_hint_text } },
+        .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " pick  ", .style = .{ .fg = col_hint_text } },
-        .{ .text = "esc",     .style = .{ .fg = col_hint_key, .bold = true } },
+        .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
         .{ .text = " cancel", .style = .{ .fg = col_hint_text } },
     });
 }
@@ -2224,10 +2224,10 @@ fn renderOnboardingOverlay(win: vaxis.Window, app: *const App) void {
                 .{ .text = " Let's create your first space and project now.", .style = .{ .fg = col_normal_fg } },
             }, .{ .row_offset = 6, .col_offset = 0, .wrap = .none });
             overlayHints(inner, oh -| 2, &[_]vaxis.Segment{
-                .{ .text = "enter",  .style = .{ .fg = col_hint_key, .bold = true } },
+                .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
                 .{ .text = " get started  ", .style = .{ .fg = col_hint_text } },
-                .{ .text = "esc",    .style = .{ .fg = col_hint_key, .bold = true } },
-                .{ .text = " skip",  .style = .{ .fg = col_hint_text } },
+                .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
+                .{ .text = " skip", .style = .{ .fg = col_hint_text } },
             });
         },
         1 => {
@@ -2244,10 +2244,10 @@ fn renderOnboardingOverlay(win: vaxis.Window, app: *const App) void {
                 .{ .text = "|", .style = .{ .fg = col_input_prompt } },
             }, .{ .row_offset = 5, .col_offset = 0, .wrap = .none });
             overlayHints(inner, oh -| 2, &[_]vaxis.Segment{
-                .{ .text = "enter",  .style = .{ .fg = col_hint_key, .bold = true } },
+                .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
                 .{ .text = " confirm  ", .style = .{ .fg = col_hint_text } },
-                .{ .text = "esc",    .style = .{ .fg = col_hint_key, .bold = true } },
-                .{ .text = " skip",  .style = .{ .fg = col_hint_text } },
+                .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
+                .{ .text = " skip", .style = .{ .fg = col_hint_text } },
             });
         },
         2 => {
@@ -2259,27 +2259,27 @@ fn renderOnboardingOverlay(win: vaxis.Window, app: *const App) void {
                 .{ .text = " e.g. api  website  q1-goals  groceries", .style = .{ .fg = col_hint_text, .italic = true } },
             }, .{ .row_offset = 3, .col_offset = 0, .wrap = .none });
             _ = inner.print(&[_]vaxis.Segment{
-                .{ .text = " Project in '",                     .style = .{ .fg = col_input_prompt, .bold = true } },
+                .{ .text = " Project in '", .style = .{ .fg = col_input_prompt, .bold = true } },
                 .{ .text = app.ob_space_buf[0..app.ob_space_len], .style = .{ .fg = col_input_prompt, .bold = true } },
-                .{ .text = "': ",                               .style = .{ .fg = col_input_prompt, .bold = true } },
+                .{ .text = "': ", .style = .{ .fg = col_input_prompt, .bold = true } },
                 .{ .text = app.ob_proj_buf[0..app.ob_proj_len], .style = .{ .fg = col_normal_fg } },
-                .{ .text = "|",                                 .style = .{ .fg = col_input_prompt } },
+                .{ .text = "|", .style = .{ .fg = col_input_prompt } },
             }, .{ .row_offset = 5, .col_offset = 0, .wrap = .none });
             overlayHints(inner, oh -| 2, &[_]vaxis.Segment{
-                .{ .text = "enter",  .style = .{ .fg = col_hint_key, .bold = true } },
+                .{ .text = "enter", .style = .{ .fg = col_hint_key, .bold = true } },
                 .{ .text = " confirm  ", .style = .{ .fg = col_hint_text } },
-                .{ .text = "esc",    .style = .{ .fg = col_hint_key, .bold = true } },
-                .{ .text = " skip",  .style = .{ .fg = col_hint_text } },
+                .{ .text = "esc", .style = .{ .fg = col_hint_key, .bold = true } },
+                .{ .text = " skip", .style = .{ .fg = col_hint_text } },
             });
         },
         3 => {
             overlayTitle(inner, " You're all set!");
             _ = inner.print(&[_]vaxis.Segment{
-                .{ .text = " \xe2\x9c\x93  Space '",             .style = .{ .fg = col_low, .bold = true } },
+                .{ .text = " \xe2\x9c\x93  Space '", .style = .{ .fg = col_low, .bold = true } },
                 .{ .text = app.ob_space_buf[0..app.ob_space_len], .style = .{ .fg = col_low, .bold = true } },
-                .{ .text = "' and project '",                    .style = .{ .fg = col_low, .bold = true } },
-                .{ .text = app.ob_proj_buf[0..app.ob_proj_len],  .style = .{ .fg = col_low, .bold = true } },
-                .{ .text = "' created.",                         .style = .{ .fg = col_low, .bold = true } },
+                .{ .text = "' and project '", .style = .{ .fg = col_low, .bold = true } },
+                .{ .text = app.ob_proj_buf[0..app.ob_proj_len], .style = .{ .fg = col_low, .bold = true } },
+                .{ .text = "' created.", .style = .{ .fg = col_low, .bold = true } },
             }, .{ .row_offset = 2, .col_offset = 0, .wrap = .none });
             _ = inner.print(&[_]vaxis.Segment{
                 .{ .text = " Switch to the Tasks panel and press [a] to add your first task.", .style = .{ .fg = col_hint_text } },
@@ -2318,19 +2318,14 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer app.deinit();
 
     while (true) {
-        // If device_waiting but no thread running yet, kick off the device flow
-        if (app.mode == .auth_overlay and
-            app.auth_mode == .device_waiting and
-            app.oauth_poll_thread == null)
-        {
-            app.startDeviceFlow(&loop);
-        }
-
         const event = loop.nextEvent();
         switch (event) {
-            .key_press    => |key| { if (handleKey(&app, key)) break; },
-            .winsize      => |ws|  { try vx.resize(allocator, ttywriter, ws); },
-            .oauth_result => |ev|  { handleOAuthResult(&app, ev); },
+            .key_press => |key| {
+                if (handleKey(&app, key)) break;
+            },
+            .winsize => |ws| {
+                try vx.resize(allocator, ttywriter, ws);
+            },
         }
         if (app.is_refresh_needed) {
             app.is_refresh_needed = false;

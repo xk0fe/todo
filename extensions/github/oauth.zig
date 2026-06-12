@@ -1,8 +1,9 @@
 /// GitHub OAuth Device Authorization Grant (pure HTTP, no threading).
 /// Reference: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow
 const std = @import("std");
-const http = @import("http.zig");
-const json_util = @import("json_util.zig");
+const shared = @import("shared");
+const http = shared.http;
+const json_util = shared.json_util;
 
 pub const DeviceCodeResponse = struct {
     device_code:      []u8,

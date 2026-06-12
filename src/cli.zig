@@ -5,7 +5,7 @@ const spec = @import("commands/spec.zig");
 const cmd_space = @import("commands/space.zig");
 const cmd_project = @import("commands/project.zig");
 const cmd_task = @import("commands/task.zig");
-const cmd_sync = @import("commands/sync.zig");
+const cmd_ext = @import("commands/ext.zig");
 
 const Handler = *const fn (std.mem.Allocator, std.fs.Dir, *std.io.Writer, []const []const u8) anyerror!void;
 
@@ -39,19 +39,21 @@ const task_routes = [_]Route{
     .{ .names = &.{spec.Subcommand.edit}, .handler = cmd_task.cmdEdit },
 };
 
-const sync_routes = [_]Route{
-    .{ .names = &.{spec.Subcommand.config}, .handler = cmd_sync.cmdConfig },
-    .{ .names = &.{spec.Subcommand.link}, .handler = cmd_sync.cmdLink },
-    .{ .names = &.{spec.Subcommand.linear}, .handler = cmd_sync.cmdLinear },
-    .{ .names = &.{spec.Subcommand.github}, .handler = cmd_sync.cmdGitHub },
-    .{ .names = &.{spec.Subcommand.trello}, .handler = cmd_sync.cmdTrello },
+const ext_routes = [_]Route{
+    .{ .names = &.{ spec.Subcommand.list, spec.Subcommand.ls }, .handler = cmd_ext.cmdList },
+    .{ .names = &.{spec.Subcommand.config}, .handler = cmd_ext.cmdConfig },
+    .{ .names = &.{spec.Subcommand.setup}, .handler = cmd_ext.cmdSetup },
+    .{ .names = &.{spec.Subcommand.link}, .handler = cmd_ext.cmdLink },
+    .{ .names = &.{spec.Subcommand.unlink}, .handler = cmd_ext.cmdUnlink },
+    .{ .names = &.{spec.Subcommand.import}, .handler = cmd_ext.cmdImport },
+    .{ .names = &.{spec.Subcommand.@"export"}, .handler = cmd_ext.cmdExport },
 };
 
 const command_groups = [_]CommandGroup{
     .{ .name = spec.Command.space, .routes = &space_routes },
     .{ .name = spec.Command.project, .routes = &project_routes },
     .{ .name = spec.Command.task, .routes = &task_routes },
-    .{ .name = spec.Command.sync, .routes = &sync_routes },
+    .{ .name = spec.Command.ext, .routes = &ext_routes },
 };
 
 fn isHelp(arg: []const u8) bool {

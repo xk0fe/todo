@@ -13,16 +13,13 @@ comptime {
     _ = @import("storage/project_store.zig");
     _ = @import("storage/task_store.zig");
     _ = @import("storage/config_store.zig");
-    _ = @import("storage/push_queue.zig");
-    _ = @import("integrations/types.zig");
-    _ = @import("integrations/json_util.zig");
-    _ = @import("integrations/http.zig");
-    _ = @import("integrations/github_oauth.zig");
-    _ = @import("integrations/linear.zig");
-    _ = @import("integrations/github.zig");
-    _ = @import("integrations/trello.zig");
-    _ = @import("integrations/sync.zig");
-    _ = @import("commands/sync.zig");
+    _ = @import("storage/ext_config.zig");
+    _ = @import("extensions/types.zig");
+    _ = @import("extensions/protocol.zig");
+    _ = @import("extensions/runner.zig");
+    _ = @import("extensions/registry.zig");
+    _ = @import("extensions/engine.zig");
+    _ = @import("commands/ext.zig");
 }
 
 pub fn main() void {
@@ -69,8 +66,14 @@ pub fn main() void {
             error.TaskNotFound => stderr.print("error: task not found.\n", .{}) catch {},
             error.InvalidStatus => stderr.print("error: invalid status. Use: {s}.\n", .{model.Status.valid_values}) catch {},
             error.InvalidPriority => stderr.print("error: invalid priority. Use: {s}.\n", .{model.Priority.valid_values}) catch {},
+            error.ExtensionNotFound => stderr.print("error: extension not found. Run `todo ext list` to see installed extensions.\n", .{}) catch {},
+            // These already printed a detailed message to stdout.
+            error.ImportFailed, error.ExportFailed, error.SetupFailed => {},
             else => stderr.print("error: {s}\n", .{@errorName(err)}) catch {},
         }
+        // process.exit skips defers — flush explicitly so buffered output is not lost
+        stdout.flush() catch {};
+        stderr.flush() catch {};
         std.process.exit(1);
     };
 }

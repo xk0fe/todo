@@ -1,9 +1,10 @@
-/// Trello REST API integration adapter.
+/// Trello REST API client.
 const std = @import("std");
-const model = @import("../model.zig");
-const http = @import("http.zig");
-const json_util = @import("json_util.zig");
-const types = @import("types.zig");
+const shared = @import("shared");
+const model = shared.task;
+const http = shared.http;
+const json_util = shared.json_util;
+const types = shared.task;
 
 pub const RemoteTask = types.RemoteTask;
 

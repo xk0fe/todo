@@ -6,6 +6,9 @@ pub const Map = std.StringHashMapUnmanaged([]const u8);
 
 /// Parse a key = "value" file into a Map.
 /// The caller owns all memory; call freeMap() when done.
+/// Values may contain escape sequences: \n, \", \\.
+/// Malformed lines are silently skipped so that a single bad entry
+/// does not prevent the rest of the file from loading.
 pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Map {
     var map: Map = .empty;
     errdefer freeMap(allocator, &map);
@@ -15,24 +18,44 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Map {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
-        const eq_pos = std.mem.indexOfScalar(u8, trimmed, '=') orelse return error.InvalidToml;
+        const eq_pos = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
         const key_raw = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
         const val_raw = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
 
-        if (key_raw.len == 0) return error.InvalidToml;
-        if (val_raw.len < 2 or val_raw[0] != '"' or val_raw[val_raw.len - 1] != '"') {
-            return error.InvalidToml;
-        }
-        const value = val_raw[1 .. val_raw.len - 1];
+        if (key_raw.len == 0) continue;
+        if (val_raw.len < 2 or val_raw[0] != '"' or val_raw[val_raw.len - 1] != '"') continue;
+        const escaped = val_raw[1 .. val_raw.len - 1];
+
+        // Unescape \n, \", \\ sequences
+        const val = try unescape(allocator, escaped);
+        errdefer allocator.free(val);
 
         const key = try allocator.dupe(u8, key_raw);
         errdefer allocator.free(key);
-        const val = try allocator.dupe(u8, value);
-        errdefer allocator.free(val);
 
         try map.put(allocator, key, val);
     }
     return map;
+}
+
+fn unescape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '\\' and i + 1 < s.len) {
+            switch (s[i + 1]) {
+                'n'  => { try out.append(allocator, '\n'); i += 2; },
+                '"'  => { try out.append(allocator, '"');  i += 2; },
+                '\\' => { try out.append(allocator, '\\'); i += 2; },
+                else => { try out.append(allocator, s[i]); i += 1; },
+            }
+        } else {
+            try out.append(allocator, s[i]);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 /// Free all keys, values, and the map itself.
@@ -48,20 +71,26 @@ pub fn freeMap(allocator: std.mem.Allocator, map: *Map) void {
 pub const KV = struct { key: []const u8, value: []const u8 };
 
 /// Serialize an ordered list of KV pairs into a `key = "value"\n` string.
+/// Special characters in values (\, ", newline) are escaped.
 /// Caller owns the returned slice.
 pub fn serialize(allocator: std.mem.Allocator, pairs: []const KV) ![]u8 {
-    // Pre-calculate exact size: key + ' = "' + value + '"\n' = key.len + value.len + 6
-    var total: usize = 0;
-    for (pairs) |kv| total += kv.key.len + kv.value.len + 6;
-
-    const buf = try allocator.alloc(u8, total);
-    errdefer allocator.free(buf);
-    var pos: usize = 0;
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
     for (pairs) |kv| {
-        const written = std.fmt.bufPrint(buf[pos..], "{s} = \"{s}\"\n", .{ kv.key, kv.value }) catch unreachable;
-        pos += written.len;
+        try out.appendSlice(allocator, kv.key);
+        try out.appendSlice(allocator, " = \"");
+        for (kv.value) |ch| {
+            switch (ch) {
+                '\\' => try out.appendSlice(allocator, "\\\\"),
+                '"'  => try out.appendSlice(allocator, "\\\""),
+                '\n' => try out.appendSlice(allocator, "\\n"),
+                '\r' => {}, // strip carriage returns
+                else => try out.append(allocator, ch),
+            }
+        }
+        try out.appendSlice(allocator, "\"\n");
     }
-    return buf;
+    return out.toOwnedSlice(allocator);
 }
 
 // --- tests ---
@@ -94,12 +123,16 @@ test "parse: skips blank lines and comments" {
     try std.testing.expectEqual(@as(usize, 1), map.count());
 }
 
-test "parse: missing equals returns error" {
-    try std.testing.expectError(error.InvalidToml, parse(std.testing.allocator, "noequalssign\n"));
+test "parse: missing equals is silently skipped" {
+    var map = try parse(std.testing.allocator, "noequalssign\n");
+    defer freeMap(std.testing.allocator, &map);
+    try std.testing.expectEqual(@as(usize, 0), map.count());
 }
 
-test "parse: unquoted value returns error" {
-    try std.testing.expectError(error.InvalidToml, parse(std.testing.allocator, "key = unquoted\n"));
+test "parse: unquoted value is silently skipped" {
+    var map = try parse(std.testing.allocator, "key = unquoted\n");
+    defer freeMap(std.testing.allocator, &map);
+    try std.testing.expectEqual(@as(usize, 0), map.count());
 }
 
 test "serialize and parse roundtrip" {

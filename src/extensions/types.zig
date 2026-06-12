@@ -1,8 +1,8 @@
-/// Shared types for integration adapters.
+/// Shared types for the extension protocol.
 const std = @import("std");
 const model = @import("../model.zig");
 
-/// A task fetched from an external service, normalised to our local model fields.
+/// A task received from an extension's import, normalised to local model fields.
 pub const RemoteTask = struct {
     external_id: []const u8,
     title:       []const u8,
@@ -36,19 +36,4 @@ test "RemoteTask can be created and deinited without leaks" {
         .url         = try allocator.dupe(u8, "https://example.com/issue/1"),
     };
     deinitRemoteTask(task, allocator);
-}
-
-test "RemoteTask with empty optional strings" {
-    const allocator = std.testing.allocator;
-    const task = RemoteTask{
-        .external_id = try allocator.dupe(u8, "1"),
-        .title       = try allocator.dupe(u8, "Minimal task"),
-        .description = try allocator.dupe(u8, ""),
-        .status      = .done,
-        .priority    = .urgent,
-        .due         = try allocator.dupe(u8, ""),
-        .url         = try allocator.dupe(u8, ""),
-    };
-    deinitRemoteTask(task, allocator);
-    // No assertions needed — the test passes if no leak is detected by testing.allocator
 }

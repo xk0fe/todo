@@ -1,9 +1,10 @@
-/// Linear GraphQL API integration adapter.
+/// Linear GraphQL API client.
 const std = @import("std");
-const model = @import("../model.zig");
-const http = @import("http.zig");
-const json_util = @import("json_util.zig");
-const types = @import("types.zig");
+const shared = @import("shared");
+const model = shared.task;
+const http = shared.http;
+const json_util = shared.json_util;
+const types = shared.task;
 
 pub const RemoteTask = types.RemoteTask;
 
@@ -35,11 +36,14 @@ pub fn parseIssues(allocator: std.mem.Allocator, body: []const u8) ![]RemoteTask
     const parsed = try json_util.parseObject(allocator, body);
     defer parsed.deinit();
 
-    // Navigate: data -> issues -> nodes
-    const data = switch (parsed.value) {
-        .object => |m| m.get("data") orelse return &.{},
+    const root = switch (parsed.value) {
+        .object => |m| m,
         else => return &.{},
     };
+    // A response with GraphQL errors and no usable data means the request
+    // failed (bad API key, malformed query) — distinguish from "no issues".
+    const data = root.get("data") orelse std.json.Value{ .null = {} };
+    if (data != .object and root.get("errors") != null) return error.LinearApiError;
     const issues = switch (data) {
         .object => |m| m.get("issues") orelse return &.{},
         else => return &.{},
@@ -201,7 +205,6 @@ pub fn fetchAllAssigned(allocator: std.mem.Allocator, api_key: []const u8) ![]Is
 }
 
 /// Push a title update back to Linear via GraphQL mutation.
-/// Status push is not implemented (requires fetching team workflow state IDs first).
 pub fn pushUpdate(
     allocator: std.mem.Allocator,
     api_key: []const u8,
@@ -229,6 +232,120 @@ pub fn pushUpdate(
         .{ .name = "Authorization", .value = api_key },
     };
     const resp = try http.request(allocator, .POST, "https://api.linear.app/graphql", &headers, fbs.getWritten());
+    resp.deinit(allocator);
+}
+
+/// Find the best matching Linear workflow state ID for a local status.
+/// Parses the response from `{team(id:"..."){states{nodes{id name type}}}}`.
+fn findBestStateId(allocator: std.mem.Allocator, body: []const u8, status: model.Status) ![]u8 {
+    const parsed = try json_util.parseObject(allocator, body);
+    defer parsed.deinit();
+
+    const data = switch (parsed.value) {
+        .object => |m| m.get("data") orelse return allocator.dupe(u8, ""),
+        else => return allocator.dupe(u8, ""),
+    };
+    const team_val = switch (data) {
+        .object => |m| m.get("team") orelse return allocator.dupe(u8, ""),
+        else => return allocator.dupe(u8, ""),
+    };
+    const states_val = switch (team_val) {
+        .object => |m| m.get("states") orelse return allocator.dupe(u8, ""),
+        else => return allocator.dupe(u8, ""),
+    };
+    const nodes_val = switch (states_val) {
+        .object => |m| m.get("nodes") orelse return allocator.dupe(u8, ""),
+        else => return allocator.dupe(u8, ""),
+    };
+    const nodes = switch (nodes_val) {
+        .array => |a| a.items,
+        else => return allocator.dupe(u8, ""),
+    };
+
+    // Map local status to the expected Linear state type
+    const target_type: []const u8 = switch (status) {
+        .todo        => "unstarted",
+        .in_progress => "started",
+        .in_review   => "started",
+        .done        => "completed",
+    };
+
+    var best_id: []const u8 = "";
+
+    for (nodes) |node| {
+        const id   = json_util.getString(node, "id");
+        const name = json_util.getString(node, "name");
+        const typ  = json_util.getString(node, "type");
+        if (!std.mem.eql(u8, typ, target_type)) continue;
+
+        if (status == .in_review) {
+            // Prefer a state whose name contains "review"
+            var lower_buf: [64]u8 = undefined;
+            const n = @min(name.len, 63);
+            const lower = std.ascii.lowerString(lower_buf[0..n], name[0..n]);
+            if (std.mem.indexOf(u8, lower, "review") != null) {
+                best_id = id;
+                break;
+            }
+            if (best_id.len == 0) best_id = id; // fallback: first "started" state
+        } else {
+            best_id = id;
+            break;
+        }
+    }
+
+    return allocator.dupe(u8, best_id);
+}
+
+/// Push a status change to Linear by resolving the team's workflow state IDs
+/// and calling issueUpdate with the matching stateId.
+pub fn pushStatusUpdate(
+    allocator: std.mem.Allocator,
+    api_key: []const u8,
+    team_id: []const u8,
+    issue_id: []const u8,
+    new_status: model.Status,
+) !void {
+    if (team_id.len == 0) return;
+
+    // Fetch workflow states for the team
+    var query_buf: [512]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&query_buf);
+    const qw = fbs.writer();
+    try qw.writeAll("{\"query\":\"{team(id:\\\"");
+    for (team_id) |ch| {
+        if (ch == '"' or ch == '\\') try qw.writeByte('\\');
+        try qw.writeByte(ch);
+    }
+    try qw.writeAll("\\\"){states{nodes{id name type}}}}\"}");
+
+    const headers = [_]http.Header{
+        .{ .name = "Authorization", .value = api_key },
+    };
+    const states_resp = try http.request(allocator, .POST, "https://api.linear.app/graphql", &headers, fbs.getWritten());
+    defer states_resp.deinit(allocator);
+
+    const state_id = try findBestStateId(allocator, states_resp.body, new_status);
+    defer allocator.free(state_id);
+    if (state_id.len == 0) return;
+
+    // Push stateId via issueUpdate mutation
+    var body_buf: [1024]u8 = undefined;
+    var fbs2 = std.io.fixedBufferStream(&body_buf);
+    const bw = fbs2.writer();
+    try bw.writeAll("{\"query\":\"mutation{issueUpdate(id:\\\"");
+    for (issue_id) |ch| {
+        if (ch == '"' or ch == '\\') try bw.writeByte('\\');
+        try bw.writeByte(ch);
+    }
+    try bw.writeAll("\\\",input:{stateId:\\\"");
+    for (state_id) |ch| {
+        if (ch == '"' or ch == '\\') try bw.writeByte('\\');
+        try bw.writeByte(ch);
+    }
+    try bw.writeAll("\\\"}){success}}\"}");
+
+    const resp = try http.request(allocator, .POST, "https://api.linear.app/graphql", &headers, fbs2.getWritten());
     resp.deinit(allocator);
 }
 
@@ -385,6 +502,11 @@ test "parseIssues: null description produces empty string" {
         allocator.free(tasks);
     }
     try std.testing.expectEqualStrings("", tasks[2].description);
+}
+
+test "parseIssues: GraphQL errors without data surface as LinearApiError" {
+    const body = "{\"errors\":[{\"message\":\"Authentication required\"}],\"data\":null}";
+    try std.testing.expectError(error.LinearApiError, parseIssues(std.testing.allocator, body));
 }
 
 test "parseIssues: empty nodes array" {

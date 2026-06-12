@@ -143,29 +143,6 @@ pub const ItemColor = enum {
     }
 };
 
-pub const IntegrationSource = enum {
-    none,
-    linear,
-    github,
-    trello,
-
-    pub fn fromString(s: []const u8) IntegrationSource {
-        if (std.mem.eql(u8, s, "linear")) return .linear;
-        if (std.mem.eql(u8, s, "github")) return .github;
-        if (std.mem.eql(u8, s, "trello")) return .trello;
-        return .none;
-    }
-
-    pub fn toString(self: IntegrationSource) []const u8 {
-        return switch (self) {
-            .none   => "",
-            .linear => "linear",
-            .github => "github",
-            .trello => "trello",
-        };
-    }
-};
-
 pub const SubTask = struct {
     title: []const u8,
     done:  bool,
@@ -184,10 +161,12 @@ pub const Task = struct {
     created:            []const u8,
     due:                []const u8,
     subtasks:           []SubTask,
-    // Integration fields — empty string / .none means not linked
+    // Extension fields — empty strings mean not linked.
+    // `source` is the name of the extension that owns the link.
     external_id:        []const u8,
-    integration_source: IntegrationSource,
+    source:             []const u8,
     synced_at:          []const u8,
+    url:                []const u8,
 
     pub fn deinit(self: Task, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
@@ -197,7 +176,9 @@ pub const Task = struct {
         for (self.subtasks) |st| st.deinit(allocator);
         allocator.free(self.subtasks);
         allocator.free(self.external_id);
+        allocator.free(self.source);
         allocator.free(self.synced_at);
+        allocator.free(self.url);
     }
 };
 

@@ -3,7 +3,7 @@ pub const Command = struct {
     pub const space = "space";
     pub const project = "project";
     pub const task = "task";
-    pub const sync = "sync";
+    pub const ext = "ext";
 };
 
 pub const HelpFlag = struct {
@@ -20,10 +20,11 @@ pub const Subcommand = struct {
     pub const done = "done";
     pub const edit = "edit";
     pub const config = "config";
+    pub const setup = "setup";
     pub const link = "link";
-    pub const linear = "linear";
-    pub const github = "github";
-    pub const trello = "trello";
+    pub const unlink = "unlink";
+    pub const import = "import";
+    pub const @"export" = "export";
 };
 
 pub const Flag = struct {
@@ -33,23 +34,6 @@ pub const Flag = struct {
     pub const due = "--due";
     pub const description = "--description";
     pub const notes = "--notes";
-
-    pub const linear_key = "--linear-key";
-    pub const linear_team = "--linear-team";
-    pub const linear_project = "--linear-project";
-
-    pub const github_token = "--github-token";
-    pub const github_client_id = "--github-client-id";
-    pub const github_owner = "--github-owner";
-    pub const github_repo = "--github-repo";
-
-    pub const trello_key = "--trello-key";
-    pub const trello_token = "--trello-token";
-    pub const trello_board = "--trello-board";
-    pub const trello_list_todo = "--trello-list-todo";
-    pub const trello_list_in_progress = "--trello-list-in-progress";
-    pub const trello_list_in_review = "--trello-list-in-review";
-    pub const trello_list_done = "--trello-list-done";
 };
 
 pub const task_filter_all = "all";
@@ -74,13 +58,13 @@ pub const usage =
     \\  todo task edit <space> <project> <id> [--title X] [--priority X] [--status X] [--due X] [--notes X]
     \\  todo task rm <space> <project> <id>
     \\
-    \\Sync commands:
-    \\  todo sync config  --linear-key KEY | --github-token TOKEN | --trello-key KEY --trello-token TOKEN
-    \\  todo sync link    <space> <project> [--linear-team ID] [--linear-project ID]
-    \\                                      [--github-owner O --github-repo R]
-    \\                                      [--trello-board ID --trello-list-todo L ...]
-    \\  todo sync linear  <space> <project>
-    \\  todo sync github  <space> <project>
-    \\  todo sync trello  <space> <project>
+    \\Extension commands (extensions are executables in ~/.todo/extensions):
+    \\  todo ext list                                    show installed extensions
+    \\  todo ext config <name> [key=value ...]           show or set global extension config
+    \\  todo ext setup  <name>                           run the extension's interactive setup
+    \\  todo ext link   <space> <project> <name> [key=value ...]
+    \\  todo ext unlink <space> <project>
+    \\  todo ext import <space> <project>                pull tasks from the linked extension
+    \\  todo ext export <space> <project>                push tasks to the linked extension
     \\
 ;

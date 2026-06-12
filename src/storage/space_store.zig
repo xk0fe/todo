@@ -2,6 +2,16 @@
 const std = @import("std");
 const model = @import("../model.zig");
 
+/// Directories under the todo root that belong to the app, not the user.
+const reserved_names = [_][]const u8{"extensions"};
+
+fn isReserved(name: []const u8) bool {
+    for (reserved_names) |r| {
+        if (std.mem.eql(u8, name, r)) return true;
+    }
+    return false;
+}
+
 /// Returns all space names (directory entries) under root_dir.
 /// Caller owns the returned slice and each string in it.
 pub fn list(allocator: std.mem.Allocator, root_dir: std.fs.Dir) ![][]const u8 {
@@ -14,6 +24,7 @@ pub fn list(allocator: std.mem.Allocator, root_dir: std.fs.Dir) ![][]const u8 {
     var iter = root_dir.iterate();
     while (try iter.next()) |entry| {
         if (entry.kind != .directory) continue;
+        if (isReserved(entry.name)) continue;
         try names.append(allocator, try allocator.dupe(u8, entry.name));
     }
 
@@ -28,7 +39,9 @@ pub fn list(allocator: std.mem.Allocator, root_dir: std.fs.Dir) ![][]const u8 {
 }
 
 /// Creates a new space directory. Returns error.AlreadyExists if it exists.
+/// Reserved names (used by the app itself) are rejected.
 pub fn add(root_dir: std.fs.Dir, name: []const u8) !void {
+    if (isReserved(name)) return error.InvalidArgument;
     root_dir.makeDir(name) catch |err| switch (err) {
         error.PathAlreadyExists => return error.AlreadyExists,
         else => return err,
@@ -99,6 +112,28 @@ test "add and list" {
     try std.testing.expectEqual(@as(usize, 2), spaces.len);
     try std.testing.expectEqualStrings("personal", spaces[0]);
     try std.testing.expectEqualStrings("work", spaces[1]);
+}
+
+test "list skips the reserved extensions directory" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try add(tmp.dir, "work");
+    try tmp.dir.makePath("extensions");
+
+    const spaces = try list(std.testing.allocator, tmp.dir);
+    defer {
+        for (spaces) |s| std.testing.allocator.free(s);
+        std.testing.allocator.free(spaces);
+    }
+    try std.testing.expectEqual(@as(usize, 1), spaces.len);
+    try std.testing.expectEqualStrings("work", spaces[0]);
+}
+
+test "add rejects reserved names" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try std.testing.expectError(error.InvalidArgument, add(tmp.dir, "extensions"));
 }
 
 test "add duplicate returns AlreadyExists" {

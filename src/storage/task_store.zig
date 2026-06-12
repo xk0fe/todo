@@ -6,26 +6,28 @@ const toml  = @import("toml.zig");
 pub const TaskFilter = enum { all, todo, in_progress, in_review, done, active };
 
 pub const AddOptions = struct {
-    title:              []const u8,
-    priority:           model.Priority = .medium,
-    description:        []const u8 = "",
-    due:                []const u8 = "",
-    external_id:        []const u8 = "",
-    integration_source: model.IntegrationSource = .none,
-    synced_at:          []const u8 = "",
+    title:       []const u8,
+    priority:    model.Priority = .medium,
+    description: []const u8 = "",
+    due:         []const u8 = "",
+    external_id: []const u8 = "",
+    source:      []const u8 = "", // owning extension name
+    synced_at:   []const u8 = "",
+    url:         []const u8 = "",
 };
 
 pub const UpdateOptions = struct {
-    title:              ?[]const u8 = null,
-    status:             ?model.Status = null,
-    priority:           ?model.Priority = null,
-    description:        ?[]const u8 = null,
-    due:                ?[]const u8 = null,
+    title:       ?[]const u8 = null,
+    status:      ?model.Status = null,
+    priority:    ?model.Priority = null,
+    description: ?[]const u8 = null,
+    due:         ?[]const u8 = null,
     /// When non-null, replaces the entire subtask list.
-    subtasks:           ?[]const model.SubTask = null,
-    external_id:        ?[]const u8 = null,
-    integration_source: ?model.IntegrationSource = null,
-    synced_at:          ?[]const u8 = null,
+    subtasks:    ?[]const model.SubTask = null,
+    external_id: ?[]const u8 = null,
+    source:      ?[]const u8 = null,
+    synced_at:   ?[]const u8 = null,
+    url:         ?[]const u8 = null,
 };
 
 /// Opens (creating if needed) the tasks directory for a given space/project.
@@ -120,22 +122,27 @@ fn readTask(allocator: std.mem.Allocator, tasks_dir: std.fs.Dir, id: u32) !model
 
     const external_id = try allocator.dupe(u8, map.get("external_id") orelse "");
     errdefer allocator.free(external_id);
-    const integration_source = model.IntegrationSource.fromString(map.get("integration_source") orelse "");
+    // "integration_source" is the on-disk key; it now holds an extension name.
+    const source = try allocator.dupe(u8, map.get("integration_source") orelse "");
+    errdefer allocator.free(source);
     const synced_at = try allocator.dupe(u8, map.get("synced_at") orelse "");
     errdefer allocator.free(synced_at);
+    const url = try allocator.dupe(u8, map.get("url") orelse "");
+    errdefer allocator.free(url);
 
     return model.Task{
-        .id                 = id,
-        .title              = title,
-        .status             = status,
-        .priority           = priority,
-        .description        = description,
-        .created            = created,
-        .due                = due,
-        .subtasks           = subtasks,
-        .external_id        = external_id,
-        .integration_source = integration_source,
-        .synced_at          = synced_at,
+        .id          = id,
+        .title       = title,
+        .status      = status,
+        .priority    = priority,
+        .description = description,
+        .created     = created,
+        .due         = due,
+        .subtasks    = subtasks,
+        .external_id = external_id,
+        .source      = source,
+        .synced_at   = synced_at,
+        .url         = url,
     };
 }
 
@@ -170,11 +177,12 @@ fn writeTask(allocator: std.mem.Allocator, tasks_dir: std.fs.Dir, task: model.Ta
         try kvs.append(allocator, .{ .key = done_key, .value = if (st.done) "true" else "false" });
     }
 
-    // Write integration fields only when task is linked to an external service
+    // Write extension link fields only when task is linked to an external item
     if (task.external_id.len > 0) {
         try kvs.append(allocator, .{ .key = "external_id",        .value = task.external_id });
-        try kvs.append(allocator, .{ .key = "integration_source", .value = task.integration_source.toString() });
+        try kvs.append(allocator, .{ .key = "integration_source", .value = task.source });
         try kvs.append(allocator, .{ .key = "synced_at",          .value = task.synced_at });
+        try kvs.append(allocator, .{ .key = "url",                .value = task.url });
     }
 
     const content = try toml.serialize(allocator, kvs.items);
@@ -207,17 +215,18 @@ pub fn add(allocator: std.mem.Allocator, root_dir: std.fs.Dir, space: []const u8
     const id = try nextTaskId(tasks_dir);
     var date_buf: [10]u8 = undefined;
     const task = model.Task{
-        .id                 = id,
-        .title              = opts.title,
-        .status             = .todo,
-        .priority           = opts.priority,
-        .description        = opts.description,
-        .created            = currentDate(&date_buf),
-        .due                = opts.due,
-        .subtasks           = &.{},
-        .external_id        = opts.external_id,
-        .integration_source = opts.integration_source,
-        .synced_at          = opts.synced_at,
+        .id          = id,
+        .title       = opts.title,
+        .status      = .todo,
+        .priority    = opts.priority,
+        .description = opts.description,
+        .created     = currentDate(&date_buf),
+        .due         = opts.due,
+        .subtasks    = &.{},
+        .external_id = opts.external_id,
+        .source      = opts.source,
+        .synced_at   = opts.synced_at,
+        .url         = opts.url,
     };
     try writeTask(allocator, tasks_dir, task);
     return id;
@@ -246,7 +255,7 @@ pub fn list(allocator: std.mem.Allocator, root_dir: std.fs.Dir, space: []const u
     std.mem.sort(u32, ids.items, {}, std.sort.asc(u32));
 
     for (ids.items) |id| {
-        const task = try readTask(allocator, tasks_dir, id);
+        const task = readTask(allocator, tasks_dir, id) catch continue;
         const keep = switch (filter) {
             .all        => true,
             .todo       => task.status == .todo,
@@ -291,8 +300,12 @@ pub fn update(allocator: std.mem.Allocator, root_dir: std.fs.Dir, space: []const
     errdefer allocator.free(new_created);
     const new_external_id = if (opts.external_id) |e| try allocator.dupe(u8, e) else try allocator.dupe(u8, task.external_id);
     errdefer allocator.free(new_external_id);
+    const new_source = if (opts.source) |s| try allocator.dupe(u8, s) else try allocator.dupe(u8, task.source);
+    errdefer allocator.free(new_source);
     const new_synced_at = if (opts.synced_at) |s| try allocator.dupe(u8, s) else try allocator.dupe(u8, task.synced_at);
     errdefer allocator.free(new_synced_at);
+    const new_url = if (opts.url) |u| try allocator.dupe(u8, u) else try allocator.dupe(u8, task.url);
+    errdefer allocator.free(new_url);
 
     // Subtasks: replace with opts.subtasks if provided, else copy existing
     var new_subtasks: []model.SubTask = undefined;
@@ -315,17 +328,18 @@ pub fn update(allocator: std.mem.Allocator, root_dir: std.fs.Dir, space: []const
     }
 
     const updated = model.Task{
-        .id                 = task.id,
-        .title              = new_title,
-        .status             = opts.status   orelse task.status,
-        .priority           = opts.priority orelse task.priority,
-        .description        = new_description,
-        .created            = new_created,
-        .due                = new_due,
-        .subtasks           = new_subtasks,
-        .external_id        = new_external_id,
-        .integration_source = opts.integration_source orelse task.integration_source,
-        .synced_at          = new_synced_at,
+        .id          = task.id,
+        .title       = new_title,
+        .status      = opts.status   orelse task.status,
+        .priority    = opts.priority orelse task.priority,
+        .description = new_description,
+        .created     = new_created,
+        .due         = new_due,
+        .subtasks    = new_subtasks,
+        .external_id = new_external_id,
+        .source      = new_source,
+        .synced_at   = new_synced_at,
+        .url         = new_url,
     };
     defer updated.deinit(allocator);
 
@@ -527,24 +541,7 @@ test "remove nonexistent returns TaskNotFound" {
     try std.testing.expectError(error.TaskNotFound, remove(tmp.dir, "work", "api", 99));
 }
 
-// ── integration field tests ───────────────────────────────────────────────────
-
-test "IntegrationSource fromString/toString round-trips" {
-    const cases = [_]struct { s: []const u8, v: model.IntegrationSource }{
-        .{ .s = "linear", .v = .linear },
-        .{ .s = "github", .v = .github },
-        .{ .s = "trello", .v = .trello },
-        .{ .s = "",       .v = .none   },
-        .{ .s = "bogus",  .v = .none   },
-    };
-    for (cases) |c| {
-        try std.testing.expectEqual(c.v, model.IntegrationSource.fromString(c.s));
-    }
-    try std.testing.expectEqualStrings("linear", model.IntegrationSource.linear.toString());
-    try std.testing.expectEqualStrings("github", model.IntegrationSource.github.toString());
-    try std.testing.expectEqualStrings("trello", model.IntegrationSource.trello.toString());
-    try std.testing.expectEqualStrings("",       model.IntegrationSource.none.toString());
-}
+// ── extension link field tests ────────────────────────────────────────────────
 
 test "task with empty external_id serializes without integration keys" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -570,10 +567,10 @@ test "task with external_id serializes with integration keys" {
     try makeProject(tmp.dir, "work", "api");
 
     _ = try add(std.testing.allocator, tmp.dir, "work", "api", .{
-        .title              = "Linked task",
-        .external_id        = "ext-abc-123",
-        .integration_source = .linear,
-        .synced_at          = "2026-04-05",
+        .title       = "Linked task",
+        .external_id = "ext-abc-123",
+        .source      = "linear",
+        .synced_at   = "2026-04-05",
     });
 
     const file = try tmp.dir.openFile("work/api/tasks/0001.toml", .{});
@@ -612,31 +609,31 @@ test "old task TOML without integration fields deserializes with defaults" {
     defer task.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("", task.external_id);
-    try std.testing.expectEqual(model.IntegrationSource.none, task.integration_source);
+    try std.testing.expectEqualStrings("", task.source);
     try std.testing.expectEqualStrings("", task.synced_at);
 }
 
-test "integration fields round-trip through add and get" {
+test "extension link fields round-trip through add and get" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try makeProject(tmp.dir, "work", "api");
 
     _ = try add(std.testing.allocator, tmp.dir, "work", "api", .{
-        .title              = "GitHub task",
-        .external_id        = "42",
-        .integration_source = .github,
-        .synced_at          = "2026-04-05",
+        .title       = "GitHub task",
+        .external_id = "42",
+        .source      = "github",
+        .synced_at   = "2026-04-05",
     });
 
     const task = try get(std.testing.allocator, tmp.dir, "work", "api", 1);
     defer task.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("42", task.external_id);
-    try std.testing.expectEqual(model.IntegrationSource.github, task.integration_source);
+    try std.testing.expectEqualStrings("github", task.source);
     try std.testing.expectEqualStrings("2026-04-05", task.synced_at);
 }
 
-test "update can set integration fields" {
+test "update can set extension link fields" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try makeProject(tmp.dir, "work", "api");
@@ -644,15 +641,31 @@ test "update can set integration fields" {
     _ = try add(std.testing.allocator, tmp.dir, "work", "api", .{ .title = "Task" });
 
     try update(std.testing.allocator, tmp.dir, "work", "api", 1, .{
-        .external_id        = "card-xyz",
-        .integration_source = .trello,
-        .synced_at          = "2026-04-05",
+        .external_id = "card-xyz",
+        .source      = "trello",
+        .synced_at   = "2026-04-05",
     });
 
     const task = try get(std.testing.allocator, tmp.dir, "work", "api", 1);
     defer task.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("card-xyz", task.external_id);
-    try std.testing.expectEqual(model.IntegrationSource.trello, task.integration_source);
+    try std.testing.expectEqualStrings("trello", task.source);
     try std.testing.expectEqualStrings("2026-04-05", task.synced_at);
+}
+
+test "task source string survives arbitrary extension names" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try makeProject(tmp.dir, "work", "api");
+
+    _ = try add(std.testing.allocator, tmp.dir, "work", "api", .{
+        .title       = "Custom ext task",
+        .external_id = "JIRA-77",
+        .source      = "my-jira-ext",
+    });
+
+    const task = try get(std.testing.allocator, tmp.dir, "work", "api", 1);
+    defer task.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("my-jira-ext", task.source);
 }
